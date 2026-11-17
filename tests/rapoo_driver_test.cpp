@@ -78,6 +78,17 @@ int main() {
     PollRapoo(ctx); // timeout must not claim an unknown/sleeping device or invent a level
     assert(ctx.out.empty() && ctx.claimed.empty());
 
+    // A silent collection is opened once, then skipped on an immediate second poll.
+    ctx = {};
+    ctx.colls = { Collection(0x1417, L"sleeping-receiver") };
+    int opensBeforeTimeout = opens;
+    PollRapoo(ctx);
+    assert(opens == opensBeforeTimeout + 1 && ctx.out.empty() && ctx.claimed.empty());
+    ctx = {};
+    ctx.colls = { Collection(0x1417, L"sleeping-receiver") };
+    PollRapoo(ctx);
+    assert(opens == opensBeforeTimeout + 1 && ctx.out.empty() && ctx.claimed.empty());
+
     ctx = {};
     ctx.colls = { Collection(0x1215, L"legacy", 7), Collection(0x4415, L"legacy-cable", 7) };
     reports = { { L"legacy", { { 0xBB, 0xB0, 0x81, 0x20, 3, 1, 37 } } },
@@ -102,8 +113,8 @@ int main() {
 
     // The same marker does not select legacy semantics on a modern Nordic collection.
     ctx = {};
-    ctx.colls = { receiver };
-    reports = { { L"receiver", { { 0xBB, 0xB0, 0x81, 0x20, 3, 2, 50 } } } };
+    ctx.colls = { Collection(0x1417, L"modern-legacy-marker") };
+    reports = { { L"modern-legacy-marker", { { 0xBB, 0xB0, 0x81, 0x20, 3, 2, 50 } } } };
     PollRapoo(ctx);
     assert(ctx.out.empty() && ctx.claimed.empty());
 

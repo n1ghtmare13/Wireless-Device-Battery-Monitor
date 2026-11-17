@@ -2,12 +2,32 @@
 // Each driver looks at the enumerated HID collections, talks to the devices it recognises and
 // appends what it finds. A driver claims a device (vendor/product id) once it has handled it so
 // that the generic fallbacks further down the chain do not report it twice.
+#include <map>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "../devices.h"
 #include "../hid.h"
+
+// Remembers devices (by collection path or another stable key) that stopped answering, so a
+// sleeping or switched-off device costs its full timeout once per `retryMs` instead of on every
+// poll. Polls run on a single worker thread, so no locking is needed.
+class Backoff {
+public:
+    explicit Backoff(ULONGLONG retryMs) : retryMs_(retryMs) {}
+    bool Waiting(const std::wstring& key) const {
+        auto it = until_.find(key);
+        return it != until_.end() && GetTickCount64() < it->second;
+    }
+    void Failed(const std::wstring& key) { until_[key] = GetTickCount64() + retryMs_; }
+    void Succeeded(const std::wstring& key) { until_.erase(key); }
+
+private:
+    ULONGLONG retryMs_;
+    std::map<std::wstring, ULONGLONG> until_;
+};
 
 struct PollContext {
     std::vector<HidColl> colls;

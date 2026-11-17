@@ -119,11 +119,12 @@ std::wstring FindExe() {
     return L"";
 }
 
-// Runs the command line and returns its stdout (empty on failure or after `timeoutMs`).
-std::string Run(std::wstring cmd, int timeoutMs) {
+// Runs the command line and captures its stdout; returns false on failure or after `timeoutMs`.
+bool Run(std::wstring cmd, int timeoutMs, std::string& out) {
+    out.clear();
     SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
     HANDLE rd, wr;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) return "";
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
     STARTUPINFOW si{ sizeof(si) };
     si.dwFlags = STARTF_USESTDHANDLES;
@@ -133,42 +134,40 @@ std::string Run(std::wstring cmd, int timeoutMs) {
     PROCESS_INFORMATION pi{};
     BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
     CloseHandle(wr);
-    std::string out;
     if (ok) {
         ULONGLONG end = GetTickCount64() + timeoutMs;
         char buf[4096];
         for (;;) {
+            if ((LONGLONG)end - (LONGLONG)GetTickCount64() <= 0) { TerminateProcess(pi.hProcess, 1); ok = FALSE; break; }
             DWORD avail = 0;
             if (!PeekNamedPipe(rd, nullptr, 0, nullptr, &avail, nullptr)) break;  // pipe closed: process done
             if (avail) {
                 DWORD n = 0;
                 if (!ReadFile(rd, buf, sizeof(buf), &n, nullptr) || !n) break;
                 out.append(buf, n);
-                if (out.size() > (1 << 20)) break;
+                if (out.size() > (1 << 20)) { TerminateProcess(pi.hProcess, 1); ok = FALSE; break; }
                 continue;
             }
-            if ((LONGLONG)end - (LONGLONG)GetTickCount64() <= 0) { TerminateProcess(pi.hProcess, 1); out.clear(); break; }
             Sleep(20);
         }
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
     }
     CloseHandle(rd);
-    return out;
+    return ok != FALSE;
 }
 
 // One headset as last reported by HeadsetControl.
 struct HscDevice { USHORT vid, pid; DeviceStatus status; };
 
-std::vector<HscDevice> Parse(const std::string& text) {
-    std::vector<HscDevice> out;
+bool Parse(const std::string& text, std::vector<HscDevice>& out) {
     size_t start = text.find('{');
-    if (start == std::string::npos) return out;
+    if (start == std::string::npos) return text.find_first_not_of(" \t\r\n") == std::string::npos;
     Json root;
     Parser ps{ text.c_str() + start, text.c_str() + text.size() };
-    if (!ps.parse(root) || root.type != Json::Obj) return out;
+    if (!ps.parse(root) || root.type != Json::Obj) return false;
     const Json* devices = root.get("devices");
-    if (!devices || devices->type != Json::Arr) return out;
+    if (!devices || devices->type != Json::Arr) return true;
     for (const Json& d : devices->arr) {
         const Json* vidJ = d.get("id_vendor");
         const Json* pidJ = d.get("id_product");
@@ -191,16 +190,19 @@ std::vector<HscDevice> Parse(const std::string& text) {
         if (s.connected && level && level->type == Json::Num && level->num >= 0) s.percent = Clamp100((int)level->num);
         out.push_back(h);
     }
-    return out;
+    return true;
 }
 
 // HeadsetControl can take several seconds per headset, so it runs on its own thread and the regular
-// poll uses its latest result instead of waiting for it. Only the battery is requested (-b), with
-// a short HID timeout so a sleeping headset cannot stall it.
+// poll uses its latest good result, keeping it if a refresh fails. The first poll waits at most five
+// seconds for the background refresh; later polls pick up its result. Only the battery is requested
+// (-b), with a short HID timeout so a sleeping headset cannot stall it. The lock protects both the
+// cached devices and the last refresh time, including failed attempts, so retries wait 50 seconds.
 SRWLOCK g_lock = SRWLOCK_INIT;
 std::vector<HscDevice> g_devices;
 ULONGLONG g_updated = 0;
 LONG g_running = 0;
+constexpr DWORD kFirstPollWaitMs = 5000;
 
 std::wstring Command() {
     static std::wstring exe = FindExe();
@@ -213,9 +215,11 @@ std::wstring Command() {
 
 void Refresh() {
     std::wstring cmd = Command();
-    std::vector<HscDevice> found = cmd.empty() ? std::vector<HscDevice>{} : Parse(Run(cmd, 30000));
+    std::string out;
+    std::vector<HscDevice> found;
+    bool ok = !cmd.empty() && Run(cmd, 30000, out) && Parse(out, found);
     AcquireSRWLockExclusive(&g_lock);
-    g_devices = found;
+    if (ok) g_devices = found;
     g_updated = GetTickCount64();
     ReleaseSRWLockExclusive(&g_lock);
 }
@@ -230,12 +234,16 @@ DWORD WINAPI RefreshThread(LPVOID) {
 
 void PollHeadsetControl(PollContext& ctx) {
     if (Command().empty()) return;
+    AcquireSRWLockShared(&g_lock);
+    ULONGLONG updated = g_updated;
+    ReleaseSRWLockShared(&g_lock);
     ULONGLONG now = GetTickCount64();
-    if (g_updated == 0) {
-        Refresh();  // first poll: wait for it, so the first display (and --list) is complete
-    } else if (now - g_updated > 50000 && InterlockedCompareExchange(&g_running, 1, 0) == 0) {
+    if ((updated == 0 || now - updated > 50000) && InterlockedCompareExchange(&g_running, 1, 0) == 0) {
         HANDLE t = CreateThread(nullptr, 0, RefreshThread, nullptr, 0, nullptr);
-        if (t) CloseHandle(t);
+        if (t) {
+            if (updated == 0) WaitForSingleObject(t, kFirstPollWaitMs);
+            CloseHandle(t);
+        }
         else InterlockedExchange(&g_running, 0);
     }
     AcquireSRWLockShared(&g_lock);

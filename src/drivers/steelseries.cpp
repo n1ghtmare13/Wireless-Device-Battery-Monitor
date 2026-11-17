@@ -163,12 +163,9 @@ bool RivalPro(HidDev& d, USHORT pid, DeviceStatus& s) {
     d.Flush();
     if (!d.Write({ 0x00, 0x92 })) return false;
     std::vector<BYTE> r;
-    ULONGLONG end = GetTickCount64() + 500;
-    for (;;) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (left <= 0 || d.Read(r, left) < 3) return false;
-        if (r[0] == 0x92 && r[1] == 0x00) break;
-    }
+    if (!d.ReadUntil(r, 500, [](const std::vector<BYTE>& r) {
+        return r.size() >= 3 && r[0] == 0x92 && r[1] == 0x00;
+    })) return false;
     if (r[2] > 100) return false;
     s = Mouse(pid, L"SteelSeries Rival Pro", false);
     s.via = L"UWB base station";

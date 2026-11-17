@@ -46,17 +46,6 @@
 
 namespace {
 
-template <class Match>
-bool ReadUntil(HidDev& d, std::vector<BYTE>& r, int timeoutMs, Match match) {
-    ULONGLONG end = GetTickCount64() + timeoutMs;
-    while ((LONGLONG)end - (LONGLONG)GetTickCount64() > 0) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (d.Read(r, left) < 0) return false;
-        if (match(r)) return true;
-    }
-    return false;
-}
-
 void PollMotospeed(PollContext& ctx) {
     for (USHORT pid : { (USHORT)0xFFE0, (USHORT)0xFFF2, (USHORT)0xFFF1 }) {
         if (ctx.IsClaimed(0x0BDA, pid)) continue;
@@ -76,7 +65,7 @@ void PollMotospeed(PollContext& ctx) {
             d.Flush();
             if (!d.Write({ 0xB5, 0x06 })) continue;
             std::vector<BYTE> r;
-            if (!ReadUntil(d, r, 1500, [](const std::vector<BYTE>& r) { return r.size() > 20 && r[0] == 0xB4; })) continue;
+            if (!d.ReadUntil(r, 1500, [](const std::vector<BYTE>& r) { return r.size() > 20 && r[0] == 0xB4; })) continue;
             int raw = r[20];
             s.via = L"2.4 GHz receiver";
             s.charging = raw >= 128;
@@ -174,7 +163,7 @@ void PollAjazz(PollContext& ctx) {
                 d.Flush();
                 if (!d.Write({ 0x00, 0x10 })) continue;  // report id 0, command 10, zero payload (checksum 0)
                 std::vector<BYTE> r;
-                bool ok = ReadUntil(d, r, 1500, [](const std::vector<BYTE>& r) {
+                bool ok = d.ReadUntil(r, 1500, [](const std::vector<BYTE>& r) {
                     if (r.size() < 32 || r[0] != 0x10 || r[1] != 0x00) return false;
                     unsigned sum = 0;
                     for (int i = 4; i <= 30; i++) sum += r[i];
@@ -242,8 +231,8 @@ void PollAjazzAj139(PollContext& ctx) {
             auto isBattery = [](const std::vector<BYTE>& r) { return r.size() > 9 && r[0] == 0xAA && r[1] == 0x30; };
             std::vector<BYTE> r;
             d.Flush();
-            bool ok = d.Write({ 0x00, 0x55, 0x30, 0xA5, 0x2E, 0x2E }) && ReadUntil(d, r, 700, isBattery);
-            if (!ok) ok = d.Write({ 0x00, 0x55, 0x30, 0xA5, 0x0B, 0x2E, 0x01, 0x01 }) && ReadUntil(d, r, 800, isBattery);
+            bool ok = d.Write({ 0x00, 0x55, 0x30, 0xA5, 0x2E, 0x2E }) && d.ReadUntil(r, 700, isBattery);
+            if (!ok) ok = d.Write({ 0x00, 0x55, 0x30, 0xA5, 0x0B, 0x2E, 0x01, 0x01 }) && d.ReadUntil(r, 800, isBattery);
             if (!ok || r[8] > 100) continue;
             bool cable = vendor == 0xA8A4;
             DeviceStatus s;

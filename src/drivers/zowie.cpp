@@ -87,14 +87,8 @@ bool PollDw(PollContext& ctx, USHORT pid) {
     in.Flush();
     if (!out.Write({ 0x08, 0xB4, 0x15 })) return false;
     std::vector<BYTE> r;
-    ULONGLONG end = GetTickCount64() + 1500;
-    bool ok = false;
-    while ((LONGLONG)end - (LONGLONG)GetTickCount64() > 0) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (in.Read(r, left) < 5) break;
-        if (r[0] == 0x09) { ok = true; break; }
-    }
-    if (!ok || r[1] == 0xE6 || r[4] != 0xC8) return false;
+    if (!in.ReadUntil(r, 1500, [](const std::vector<BYTE>& r) { return r.size() >= 5 && r[0] == 0x09; })) return false;
+    if (r[1] == 0xE6 || r[4] != 0xC8) return false;
     int mv = (r[1] * 256 + r[2]) * 10;
     bool cable = pid != 0x800A && pid != 0x8008;  // 800A: DW receiver, 8008: U2 receiver
     DeviceStatus s;

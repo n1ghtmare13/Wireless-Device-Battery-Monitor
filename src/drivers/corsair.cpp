@@ -24,12 +24,7 @@ bool PollVoid(const HidColl& c, DeviceStatus& s) {
     d.Flush();
     std::vector<BYTE> r;
     if (!d.Write({ 0xC9, 0x64 })) return false;
-    ULONGLONG end = GetTickCount64() + 1000;
-    while (true) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (left <= 0 || d.Read(r, left) < 5) return false;
-        break;
-    }
+    if (!d.ReadUntil(r, 1000, [](const std::vector<BYTE>& r) { return r.size() >= 5; })) return false;
     BYTE st = r[4];
     s.key = L"corsair:" + Hex4(c.pid);
     s.name = HidProduct(c);
@@ -67,19 +62,13 @@ private:
         if (!d_.Write(req)) return false;
         BYTE source = target == 0x08 ? 0x00 : 0x01;
         size_t o = plain ? 0 : 1;  // offset of the source byte in the reply
-        ULONGLONG end = GetTickCount64() + timeoutMs;
         std::vector<BYTE> r;
-        for (;;) {
-            int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-            if (left <= 0) return false;
-            int n = d_.Read(r, left);
-            if (n < 0) return false;
-            if ((size_t)n < o + 7) continue;
-            if (r[o + 1] != 0x02 || r[o] != source) continue;  // notification or another app's reply
-            if (r[o + 2] != 0x00) return false;
-            value = r[o + 3] | (r[o + 4] << 8) | (r[o + 5] << 16) | ((unsigned)r[o + 6] << 24);
-            return true;
-        }
+        if (!d_.ReadUntil(r, timeoutMs, [&](const std::vector<BYTE>& x) {
+            return x.size() >= o + 7 && x[o + 1] == 0x02 && x[o] == source;  // skips notifications and other apps' replies
+        })) return false;
+        if (r[o + 2] != 0x00) return false;
+        value = r[o + 3] | (r[o + 4] << 8) | (r[o + 5] << 16) | ((unsigned)r[o + 6] << 24);
+        return true;
     }
 
     enum Mode { Unknown, Prefixed, Plain };

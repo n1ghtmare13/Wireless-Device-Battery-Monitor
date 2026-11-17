@@ -45,13 +45,7 @@ bool Query(HidDev& d, BYTE cmd, std::vector<BYTE>& r) {
     req.insert(req.end(), payload.begin(), payload.end());
     d.Flush();
     if (!d.Write(req)) return false;
-    ULONGLONG end = GetTickCount64() + 600;
-    while ((LONGLONG)end - (LONGLONG)GetTickCount64() > 0) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (d.Read(r, left) < 13) return false;
-        if (r[0] == cmd && r[3] == 0x01) return true;
-    }
-    return false;
+    return d.ReadUntil(r, 600, [&](const std::vector<BYTE>& r) { return r.size() >= 13 && r[0] == cmd && r[3] == 0x01; });
 }
 
 constexpr USHORT kLinkKm = 0xD026;     // Keychron Link-KM 2.4 GHz receiver

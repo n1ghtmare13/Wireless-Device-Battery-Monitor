@@ -57,13 +57,10 @@ bool Query(HidDev& d, BYTE cmd, std::vector<BYTE>& r, bool areson = false) {
     req[16] = Checksum(req.data());
     d.Flush();
     if (!(areson ? d.SetFeature(req) : d.Write(req))) return false;
-    BYTE replyId = areson ? 0x09 : 0x08;
-    ULONGLONG end = GetTickCount64() + 500;
-    for (;;) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (left <= 0 || d.Read(r, left) < 17) return false;
-        if (r[0] == replyId && r[1] == cmd && r[16] == Checksum(r.data())) return true;
-    }
+    const BYTE replyId = areson ? 0x09 : 0x08;
+    return d.ReadUntil(r, 500, [&](const std::vector<BYTE>& x) {
+        return x.size() >= 17 && x[0] == replyId && x[1] == cmd && x[16] == Checksum(x.data());
+    });
 }
 
 std::wstring CleanName(std::wstring n, USHORT vid, USHORT pid) {

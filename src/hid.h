@@ -48,6 +48,17 @@ public:
     bool Write(std::initializer_list<BYTE> data, int timeoutMs = 500) { return Write(std::vector<BYTE>(data), timeoutMs); }
     // Reads one input report into `buf` (resized to fit). Returns the byte count, or -1 on timeout/error.
     int Read(std::vector<BYTE>& buf, int timeoutMs);
+    // Reads input reports until `match(buf)` accepts one (true) or `timeoutMs` runs out (false).
+    // Reports the predicate rejects (notifications, movement, other apps' replies) are skipped.
+    template <class Match>
+    bool ReadUntil(std::vector<BYTE>& buf, int timeoutMs, Match match) {
+        const ULONGLONG end = GetTickCount64() + (ULONGLONG)(timeoutMs > 0 ? timeoutMs : 0);
+        for (;;) {
+            const LONGLONG left = (LONGLONG)end - (LONGLONG)GetTickCount64();
+            if (left <= 0 || Read(buf, (int)left) < 0) return false;
+            if (match(buf)) return true;
+        }
+    }
     // For collections without an interrupt OUT pipe (WriteFile fails there): arms a read, sends
     // `data` with HidD_SetOutputReport, and returns the first input report like Read() does.
     int SetOutputAndRead(const std::vector<BYTE>& data, std::vector<BYTE>& buf, int timeoutMs);

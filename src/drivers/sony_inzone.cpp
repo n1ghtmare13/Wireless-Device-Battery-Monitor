@@ -61,18 +61,14 @@ Reply GetBattery(HidDev& d, size_t minPayload, std::vector<BYTE>& payload) {
     req[13] = (BYTE)sum;
     d.Flush();
     if (!d.Write(req)) return Reply::Failed;
-    ULONGLONG end = GetTickCount64() + 1500;
+    Event e;
     std::vector<BYTE> r;
-    while ((LONGLONG)end - (LONGLONG)GetTickCount64() > 0) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (d.Read(r, left) < 15) return Reply::NoReply;
-        Event e;
-        if (!ParseEvent(r, e) || e.id != 0x04 || e.tid != tid || e.payload.size() < minPayload) continue;
-        if (e.type != 0x10 && e.type != 0xA0) continue;  // RET or active notification
-        payload = std::move(e.payload);
-        return Reply::Ok;
-    }
-    return Reply::NoReply;
+    if (!d.ReadUntil(r, 1500, [&](const std::vector<BYTE>& x) {
+        return x.size() >= 15 && ParseEvent(x, e) && e.id == 0x04 && e.tid == tid && e.payload.size() >= minPayload &&
+               (e.type == 0x10 || e.type == 0xA0);  // RET or active notification
+    })) return Reply::NoReply;
+    payload = std::move(e.payload);
+    return Reply::Ok;
 }
 
 // Lowest bud charge percent, or -1 when both are docked. FF = docked

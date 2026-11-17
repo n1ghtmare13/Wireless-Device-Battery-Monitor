@@ -29,6 +29,12 @@ test:
 	./build/rapoo_protocol_test.exe
 	$(CXX) $(CXXFLAGS) tests/rapoo_driver_test.cpp src/drivers/rapoo.cpp -o build/rapoo_driver_test.exe
 	./build/rapoo_driver_test.exe
+	$(CXX) $(CXXFLAGS) tests/aula_driver_test.cpp src/drivers/aula.cpp -o build/aula_driver_test.exe
+	./build/aula_driver_test.exe
+	$(CXX) $(CXXFLAGS) tests/readuntil_backoff_test.cpp -o build/readuntil_backoff_test.exe
+	./build/readuntil_backoff_test.exe
+	$(CXX) $(CXXFLAGS) tests/hid_helpers_test.cpp src/hid.cpp -o build/hid_helpers_test.exe -lhid -lsetupapi
+	./build/hid_helpers_test.exe
 	$(CXX) $(CXXFLAGS) tests/ninjutso_driver_test.cpp src/drivers/ninjutso.cpp -o build/ninjutso_driver_test.exe
 	./build/ninjutso_driver_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/galaxy_buds_protocol_test.cpp -o build/galaxy_buds_protocol_test.exe
