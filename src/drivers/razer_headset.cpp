@@ -11,6 +11,7 @@
 namespace {
 
 constexpr ULONGLONG kMinIntervalMs = 5 * 60 * 1000;
+Backoff g_retry(kMinIntervalMs);
 
 std::vector<BYTE> Packet(BYTE dir, BYTE cls) {
     std::vector<BYTE> b(64, 0);
@@ -53,6 +54,8 @@ void PollRazerHeadsets(PollContext& ctx) {
             ctx.Add(cache.status, 0x1532, pid);
             continue;
         }
+        const auto& path = colls[0]->path;
+        if (g_retry.Waiting(path)) continue;
         HidDev d;
         if (!d.Open(*colls[0])) continue;
         // Handshake the headset expects before reads (init, charging state on both links).
@@ -62,7 +65,11 @@ void PollRazerHeadsets(PollContext& ctx) {
         Sleep(250);
         d.Flush();
         std::vector<BYTE> r;
-        if (!Get(d, 0x21, r) || r[13] > 100) continue;
+        if (!Get(d, 0x21, r) || r[13] > 100) {
+            g_retry.Failed(path);
+            continue;
+        }
+        g_retry.Succeeded(path);
         DeviceStatus s;
         s.key = L"blackshark:" + Hex4(pid);
         s.name = Name(pid);

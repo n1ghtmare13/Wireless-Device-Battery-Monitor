@@ -22,9 +22,12 @@ constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
+constexpr UINT_PTR TIMER_ALERT = 3;
+constexpr UINT ALERT_SHOW_MS = 20 * 1000;  // how long the widget-mode warning icon stays in the tray
 constexpr DWORD POLL_INTERVAL_MS = 60 * 1000;
 constexpr int LOW_BATTERY = 15;
 constexpr UINT PLACEHOLDER_ID = 1;
+constexpr UINT ALERT_ID = 2;  // temporary icon carrying the low-battery warning in widget mode
 
 enum MenuId : UINT { ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_DEVICE_FIRST = 1000 };
 
@@ -56,6 +59,8 @@ struct TrayEntry {
 std::map<std::wstring, TrayEntry> g_entries;
 bool g_placeholder = false;
 HICON g_placeholderIcon = nullptr;
+bool g_alert = false;
+HICON g_alertIcon = nullptr;
 
 // ---- helpers ----------------------------------------------------------------------------------
 
@@ -317,6 +322,35 @@ void UpdatePlaceholder() {
     }
 }
 
+// Returns true (and the message) once per discharge when a shown device drops to LOW_BATTERY;
+// re-armed by charging or by the level rising 10 points above the threshold.
+bool TakeLowBatteryWarning(TrayEntry& e, std::wstring& info) {
+    const auto& s = e.st;
+    int shown = s.percent >= 0 ? s.percent : e.lastPct;
+    if (s.charging || shown > LOW_BATTERY + 10) e.lowWarned = false;
+    if (s.charging || s.percent < 0 || s.percent > LOW_BATTERY || e.lowWarned) return false;
+    e.lowWarned = true;
+    info = s.name + L" is at " + std::to_wstring(s.percent) + L"%";
+    return true;
+}
+
+void HideAlert() {
+    KillTimer(g_hwnd, TIMER_ALERT);
+    if (g_alert) TrayDelete(ALERT_ID);
+    g_alert = false;
+    if (g_alertIcon) { DestroyIcon(g_alertIcon); g_alertIcon = nullptr; }
+}
+
+// The taskbar widget has no tray icon to attach a notification to, so a temporary one carries it.
+void ShowAlert(int pct, const std::wstring& info) {
+    HICON icon = IconFor(pct, false, false);
+    TrayCall(g_alert ? NIM_MODIFY : NIM_ADD, ALERT_ID, icon, L"Wireless Battery\n" + info, L"Low battery", info);
+    if (g_alertIcon) DestroyIcon(g_alertIcon);
+    g_alertIcon = icon;
+    g_alert = true;
+    SetTimer(g_hwnd, TIMER_ALERT, ALERT_SHOW_MS, nullptr);
+}
+
 void ApplyEntry(TrayEntry& e) {
     const auto& s = e.st;
     bool visible = s.connected && !g_useWidget && !IsEntryHidden(e);
@@ -334,14 +368,8 @@ void ApplyEntry(TrayEntry& e) {
     }
     std::wstring tip = s.name + L"\n" + StatusText(e);
 
-    const wchar_t* infoTitle = nullptr;
     std::wstring info;
-    if (s.charging || shown > LOW_BATTERY + 10) e.lowWarned = false;
-    if (!s.charging && s.percent >= 0 && s.percent <= LOW_BATTERY && !e.lowWarned) {
-        e.lowWarned = true;
-        infoTitle = L"Low battery";
-        info = s.name + L" is at " + std::to_wstring(s.percent) + L"%";
-    }
+    const wchar_t* infoTitle = TakeLowBatteryWarning(e, info) ? L"Low battery" : nullptr;
     TrayCall(e.added ? NIM_MODIFY : NIM_ADD, e.uid, e.icon, tip, infoTitle, info);
     e.added = true;
 }
@@ -358,7 +386,7 @@ int KindOrder(DeviceKind k) {  // headset first, then mouse, ... (matches the le
 
 void UpdateWidget() {
     if (!g_useWidget) return;
-    std::vector<const TrayEntry*> list;
+    std::vector<TrayEntry*> list;
     for (auto& [k, e] : g_entries)
         if (e.st.connected && !IsEntryHidden(e)) list.push_back(&e);
     std::sort(list.begin(), list.end(), [](const TrayEntry* a, const TrayEntry* b) {
@@ -366,8 +394,14 @@ void UpdateWidget() {
         return ka != kb ? ka < kb : a->st.name < b->st.name;
     });
     std::vector<WidgetItem> items;
-    std::wstring tip;
+    std::wstring tip, alert;
+    int alertPct = 100;
     for (auto* e : list) {
+        std::wstring info;
+        if (TakeLowBatteryWarning(*e, info)) {
+            alert += (alert.empty() ? L"" : L"\n") + info;
+            alertPct = std::min(alertPct, e->st.percent);
+        }
         WidgetItem it;
         it.kind = e->st.kind;
         it.percent = e->st.percent >= 0 ? e->st.percent : e->lastPct;
@@ -382,6 +416,7 @@ void UpdateWidget() {
     }
     if (tip.empty()) tip = L"Wireless Battery: no devices with battery info found";
     widget::SetItems(items, tip);
+    if (!alert.empty()) ShowAlert(alertPct, alert);
 }
 
 void OnResults(std::vector<DeviceStatus>& results) {
@@ -450,6 +485,7 @@ void SetHideLastKnown(bool on) {
 
 void ReAddAll() {
     g_placeholder = false;
+    g_alert = false;  // Explorer restarted: the warning icon is gone with it
     for (auto& [k, e] : g_entries) { e.added = false; ApplyEntry(e); }
     UpdatePlaceholder();
 }
@@ -560,6 +596,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == TIMER_DEBOUNCE) { KillTimer(h, TIMER_DEBOUNCE); SetEvent(g_refreshEvt); }
             if (wp == TIMER_WIDGET) Reconcile();
+            if (wp == TIMER_ALERT) HideAlert();
             return 0;
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) {
@@ -577,6 +614,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (e.icon) DestroyIcon(e.icon);
             }
             if (g_placeholder) TrayDelete(PLACEHOLDER_ID);
+            HideAlert();
             PostQuitMessage(0);
             return 0;
     }

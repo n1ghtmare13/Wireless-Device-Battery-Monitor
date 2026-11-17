@@ -27,12 +27,7 @@ const wchar_t* ModelName(USHORT pid, BYTE model) {
 bool QueryStatus(HidDev& d, std::vector<BYTE>& r) {
     d.Flush();
     if (!d.Write({ 0x00, 0x46, 0x81, 0x00 })) return false;
-    ULONGLONG end = GetTickCount64() + 500;
-    for (;;) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (left <= 0 || d.Read(r, left) < 13) return false;
-        if (r[0] == 0x47 && r[1] == 0x81) return true;
-    }
+    return d.ReadUntil(r, 500, [](const std::vector<BYTE>& r) { return r.size() >= 13 && r[0] == 0x47 && r[1] == 0x81; });
 }
 
 }  // namespace

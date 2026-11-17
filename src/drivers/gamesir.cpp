@@ -29,14 +29,8 @@ void PollGameSir(PollContext& ctx) {
             d.Flush();
             if (!d.Write({ 0x00, 0x01, 0x01 })) continue;
             std::vector<BYTE> r;
-            bool found = false;
-            ULONGLONG end = GetTickCount64() + 800;
-            while (!found && (LONGLONG)end - (LONGLONG)GetTickCount64() > 0) {
-                if (d.Read(r, 200) < 19) continue;
-                if (r[0] != 0x01) continue;  // state frame (F4 00 ...) or anything else
-                found = true;
-            }
-            if (!found || (r[18] > 100 && r[18] != 0xFF)) continue;
+            if (!d.ReadUntil(r, 800, [](const std::vector<BYTE>& r) { return r.size() >= 19 && r[0] == 0x01; })) continue;
+            if (r[18] > 100 && r[18] != 0xFF) continue;
             DeviceStatus s;
             s.key = L"gamesir:" + Hex4(pid);
             s.name = L"GameSir Nova";

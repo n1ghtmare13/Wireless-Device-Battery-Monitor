@@ -34,12 +34,7 @@ bool Query(HidDev& d, BYTE cmd, std::vector<BYTE>& r) {
     req[16] = Checksum(req.data());
     d.Flush();
     if (!d.Write(req)) return false;
-    ULONGLONG end = GetTickCount64() + 500;
-    for (;;) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (left <= 0 || d.Read(r, left) < 17) return false;
-        if (r[0] == 0x08 && r[1] == cmd && r[16] == Checksum(r.data())) return true;
-    }
+    return d.ReadUntil(r, 500, [&](const std::vector<BYTE>& r) { return r.size() >= 17 && r[0] == 0x08 && r[1] == cmd && r[16] == Checksum(r.data()); });
 }
 
 std::wstring CleanName(std::wstring n, USHORT vid, USHORT pid) {

@@ -15,7 +15,7 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 ## Display
 
 **On the taskbar (default):** `🎧 30%  🖱 93%` next to the notification area, drawn with the Windows icon font.
-- **Low battery:** a red number means 15% or less.
+- **Low battery:** a red number means 15% or less, plus a "Low battery" notification (a temporary tray icon carries it for ~20 s).
 - **Charging:** a blue ⚡ appears next to the number.
 - **Asleep:** dimmed text means the device is asleep and the last known value is shown.
 - **Theme:** it follows light/dark mode and DPI scaling.
@@ -42,7 +42,7 @@ Hover for details. Click for the menu: every device (click one to hide or show i
 | **Keychron mice** | M4 and other Keychron mice on the 2.4 GHz receiver; 8K mice (M5 8K, G6 HE 8K ...) on the TurboLink 8K receiver | Vendor report from Keychron Launcher |
 | **LAMZU** | Maya X, Maya, Maya M, Tachi, Inca, Paro, Thorn, Atlantis Mini / OG Champion, Orcus (cable, 1K and 4K/8K dongles) | Vendor feature report from LAMZU Aurora |
 | **Redragon** | Compx-based wireless mice: M916 Pro 1K (tested), M913 Impact Elite (tri-mode), G49 (receiver or cable) | Kysona protocol |
-| **AULA** | F75 / F87 Pro / F99 wireless keyboards on the 2.4 GHz receiver | Report 0x13 frame, command 0x4A, sum checksum (Bluetooth and wired modes untested) |
+| **AULA** | F75 / F87 Pro / F99 wireless keyboards on the 2.4 GHz receiver (several receivers can be plugged in at once, each reported separately; empty receiver detected via command 0x07) | Report 0x13 frame, 0x07 link status, command 0x4A, sum checksum (Bluetooth and wired modes untested; see [AULA protocol notes](docs/aula.md)) |
 | **ASUS ROG** | Strix Scope II 96 (RX), Azoth, Falchion keyboards; Keris, Harpe, Gladius, Chakram, Spatha, Pugio, Strix Impact mice; the Omni Receiver | ROG HID battery query |
 | **ZOWIE** | EC1/EC2/EC3-CW and DW series (U2-DW, S2-DW ...) | Community-documented read-only vendor commands |
 | **Rapoo VT** | VT3 Max Gen 2 (tested); other Nordic 54L VT mice exposing the same status interface; legacy VT3 Pro (experimental) | Passive HID status report `07` on `FF00:0002`; legacy `BB` restricted to VT3 Pro `1215/4415`. Receiver and USB cable, with charging state |

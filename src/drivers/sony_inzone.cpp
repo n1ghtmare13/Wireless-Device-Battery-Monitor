@@ -49,20 +49,16 @@ bool GetBattery(HidDev& d, int& percent, bool& charging, bool& offline) {
     req[13] = (BYTE)sum;
     d.Flush();
     if (!d.Write(req)) return false;
-    ULONGLONG end = GetTickCount64() + 1500;
+    Event e;
     std::vector<BYTE> r;
-    while ((LONGLONG)end - (LONGLONG)GetTickCount64() > 0) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (d.Read(r, left) < 15) return false;
-        Event e;
-        if (!ParseEvent(r, e) || e.id != 0x04 || e.tid != tid || e.payload.size() < 2) continue;
-        if (e.type != 0x10 && e.type != 0xA0) continue;  // RET or active notification
-        offline = e.payload[1] == 0xFF;
-        percent = offline ? -1 : (e.payload[1] <= 100 ? e.payload[1] : -1);
-        charging = e.payload[0] != 0;
-        return true;
-    }
-    return false;
+    if (!d.ReadUntil(r, 1500, [&](const std::vector<BYTE>& r) {
+        return r.size() >= 15 && ParseEvent(r, e) && e.id == 0x04 && e.tid == tid &&
+               e.payload.size() >= 2 && (e.type == 0x10 || e.type == 0xA0);
+    })) return false;
+    offline = e.payload[1] == 0xFF;
+    percent = offline ? -1 : (e.payload[1] <= 100 ? e.payload[1] : -1);
+    charging = e.payload[0] != 0;
+    return true;
 }
 
 }  // namespace

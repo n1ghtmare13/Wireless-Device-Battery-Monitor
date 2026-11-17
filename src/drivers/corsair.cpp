@@ -24,12 +24,7 @@ bool PollVoid(const HidColl& c, DeviceStatus& s) {
     d.Flush();
     std::vector<BYTE> r;
     if (!d.Write({ 0xC9, 0x64 })) return false;
-    ULONGLONG end = GetTickCount64() + 1000;
-    while (true) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (left <= 0 || d.Read(r, left) < 5) return false;
-        break;
-    }
+    if (!d.ReadUntil(r, 1000, [](const std::vector<BYTE>& r) { return r.size() >= 5; })) return false;
     BYTE st = r[4];
     s.key = L"corsair:" + Hex4(c.pid);
     s.name = HidProduct(c);
@@ -52,16 +47,13 @@ public:
         d_.Flush();
         if (!d_.Write(req)) return false;
         BYTE source = target == 0x08 ? 0x00 : 0x01;
-        ULONGLONG end = GetTickCount64() + timeoutMs;
         std::vector<BYTE> r;
-        for (;;) {
-            int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-            if (left <= 0 || d_.Read(r, left) < 8) return false;
-            if (r[2] != 0x02 || r[1] != source) continue;  // notification or another app's reply
-            if (r[3] != 0x00) return false;
-            value = r[4] | (r[5] << 8) | (r[6] << 16) | ((unsigned)r[7] << 24);
-            return true;
-        }
+        if (!d_.ReadUntil(r, timeoutMs, [&](const std::vector<BYTE>& r) {
+            return r.size() >= 8 && r[2] == 0x02 && r[1] == source;
+        })) return false;
+        if (r[3] != 0x00) return false;
+        value = r[4] | (r[5] << 8) | (r[6] << 16) | ((unsigned)r[7] << 24);
+        return true;
     }
 
 private:

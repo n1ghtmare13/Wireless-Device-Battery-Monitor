@@ -11,12 +11,7 @@ namespace {
 template <class Match>
 bool Query(HidDev& d, const std::vector<BYTE>& req, std::vector<BYTE>& resp, int timeoutMs, Match match) {
     if (!d.Write(req)) return false;
-    ULONGLONG end = GetTickCount64() + timeoutMs;
-    for (;;) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        if (left <= 0 || d.Read(resp, left) < 0) return false;
-        if (match(resp)) return true;
-    }
+    return d.ReadUntil(resp, timeoutMs, match);
 }
 
 DeviceStatus Base(USHORT pid, const wchar_t* name) {

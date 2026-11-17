@@ -13,6 +13,9 @@
 
 namespace {
 
+constexpr ULONGLONG kRetryMs = 3 * 60 * 1000;
+Backoff g_retry(kRetryMs);
+
 // Selected names from Rapoo's manifests. Support is determined by the collection and valid
 // status frame, so other models on the same protocol work without extending this table.
 struct Model { USHORT cable, receiver; const wchar_t* name; };
@@ -46,14 +49,10 @@ bool IsLegacyVT3Pro(USHORT pid) { return pid == 0x1215 || pid == 0x4415; }
 bool ReadBattery(HidDev& d, Rapoo::Battery& battery, Rapoo::Profile profile) {
     // A passive legacy report can take ~3.2 seconds. One deadline includes unrelated reports;
     // do not flush, since a queued status report is already useful.
-    ULONGLONG end = GetTickCount64() + 4000;
-    do {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-        std::vector<BYTE> r;
-        if (left <= 0 || d.Read(r, left) < 0) return false;
-        if (Rapoo::DecodeBattery(r.data(), r.size(), battery, profile)) return true;
-    } while (GetTickCount64() < end);
-    return false;
+    std::vector<BYTE> r;
+    return d.ReadUntil(r, 4000, [&](const std::vector<BYTE>& r) {
+        return Rapoo::DecodeBattery(r.data(), r.size(), battery, profile);
+    });
 }
 
 }  // namespace
@@ -65,11 +64,16 @@ void PollRapoo(PollContext& ctx) {
                  return c.page() == 0xFF00 && c.usage() == 0x0002 &&
                         (c.inLen() == 19 || (c.inLen() == 7 && IsLegacyVT3Pro(pid)));
              })) {
+            if (g_retry.Waiting(c->path)) continue;
             HidDev d;
             if (!d.Open(*c)) continue;
             Rapoo::Battery battery;
             auto profile = c->inLen() == 7 ? Rapoo::Profile::LegacyVT3Pro : Rapoo::Profile::Nordic54L;
-            if (!ReadBattery(d, battery, profile)) continue;
+            if (!ReadBattery(d, battery, profile)) {
+                g_retry.Failed(c->path);
+                continue;
+            }
+            g_retry.Succeeded(c->path);
 
             const Model* model = FindModel(battery.mousePid ? battery.mousePid : pid);
             USHORT identity = model ? model->cable : (battery.mousePid ? battery.mousePid : pid);

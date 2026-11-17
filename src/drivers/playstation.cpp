@@ -27,30 +27,27 @@ void PollPlayStation(PollContext& ctx) {
         }
         std::vector<BYTE> r;
         int pct = -1;
-        bool charging = false, found = false;
-        ULONGLONG end = GetTickCount64() + 500;
-        while (!found && (LONGLONG)end - (LONGLONG)GetTickCount64() > 0) {
-            if (d.Read(r, 100) < 10) continue;
-            if (IsDs4(c.pid)) {
-                size_t at = r[0] == 0x01 ? 30 : r[0] == 0x11 ? 32 : 0;
-                if (!at || r.size() <= at || (r[0] == 0x01 && bt)) continue;
-                int level = r[at] & 0x0F;
-                bool cable = (r[at] & 0x10) != 0;
-                if (c.pid == 0x0BA0 && r[at] == 0) break;  // wireless adapter without a controller
-                pct = cable ? (level >= 11 ? 100 : Clamp100(level * 10)) : Clamp100(level * 10 + 5);
-                charging = cable && level < 11;
-                found = true;
-            } else {
-                size_t at = r[0] == 0x01 ? 53 : r[0] == 0x31 ? 54 : 0;
-                if (!at || r.size() <= at || (r[0] == 0x01 && bt)) continue;
-                int level = r[at] & 0x0F, state = r[at] >> 4;
-                pct = Clamp100(level * 10 + 5);
-                charging = state == 0x1;
-                if (state == 0x2) { pct = 100; charging = true; }
-                found = true;
-            }
+        bool charging = false;
+        if (!d.ReadUntil(r, 500, [&](const std::vector<BYTE>& r) {
+            if (r.size() < 10) return false;
+            size_t at = IsDs4(c.pid) ? (r[0] == 0x01 ? 30 : r[0] == 0x11 ? 32 : 0)
+                                     : (r[0] == 0x01 ? 53 : r[0] == 0x31 ? 54 : 0);
+            return at && r.size() > at && !(r[0] == 0x01 && bt);
+        })) continue;
+        if (IsDs4(c.pid)) {
+            size_t at = r[0] == 0x01 ? 30 : 32;
+            int level = r[at] & 0x0F;
+            bool cable = (r[at] & 0x10) != 0;
+            if (c.pid == 0x0BA0 && r[at] == 0) continue;  // wireless adapter without a controller
+            pct = cable ? (level >= 11 ? 100 : Clamp100(level * 10)) : Clamp100(level * 10 + 5);
+            charging = cable && level < 11;
+        } else {
+            size_t at = r[0] == 0x01 ? 53 : 54;
+            int level = r[at] & 0x0F, state = r[at] >> 4;
+            pct = Clamp100(level * 10 + 5);
+            charging = state == 0x1;
+            if (state == 0x2) { pct = 100; charging = true; }
         }
-        if (!found) continue;
         DeviceStatus s;
         UINT h = 2166136261u;
         for (wchar_t ch : c.path) { h ^= ch; h *= 16777619u; }
