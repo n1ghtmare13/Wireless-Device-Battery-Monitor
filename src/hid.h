@@ -38,6 +38,7 @@ public:
     HidDev& operator=(const HidDev&) = delete;
 
     bool Open(const HidColl& c);            // read/write, overlapped
+    bool OpenReadOnly(const HidColl& c);    // read only, overlapped: for push-only collections another app may hold
     bool OpenFeatureOnly(const HidColl& c);  // zero access: enough for feature reports, works on mice/keyboards
     void Close();
     bool ok() const { return h_ != INVALID_HANDLE_VALUE; }
@@ -58,6 +59,9 @@ public:
             if (match(buf)) return true;
         }
     }
+    // For collections without an interrupt OUT pipe (WriteFile fails there): arms a read, sends
+    // `data` with HidD_SetOutputReport, and returns the first input report like Read() does.
+    int SetOutputAndRead(const std::vector<BYTE>& data, std::vector<BYTE>& buf, int timeoutMs);
     void Flush();  // discard queued input reports
 
     bool SetFeature(const std::vector<BYTE>& data);

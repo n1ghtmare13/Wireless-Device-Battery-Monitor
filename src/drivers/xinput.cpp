@@ -44,8 +44,14 @@ IRawGameControllerStatics* Statics() {
     return statics;
 }
 
-// Adds Xbox controllers with a real percentage. Returns how many were added.
-int PollWgi(PollContext& ctx) {
+// Vendors whose controllers report a real battery through Windows.Gaming.Input:
+// Microsoft, and GameSir in Xbox (GIP) mode (e.g. G7 Pro on its receiver, 3537:105E).
+bool WgiVendor(UINT16 vid) { return vid == 0x045E || vid == 0x3537; }
+
+// Adds Xbox controllers with a real percentage. Returns how many were added; `thirdParty` counts
+// the non-Microsoft ones among them.
+int PollWgi(PollContext& ctx, int& thirdParty) {
+    thirdParty = 0;
     IRawGameControllerStatics* statics = Statics();
     if (!statics) return 0;
     __FIVectorView_1_Windows__CGaming__CInput__CRawGameController* list = nullptr;
@@ -61,7 +67,7 @@ int PollWgi(PollContext& ctx) {
         raw->get_HardwareProductId(&pid);
         IGameControllerBatteryInfo* info = nullptr;
         IBatteryReport* report = nullptr;
-        if (vid == 0x045E && SUCCEEDED(raw->QueryInterface(__uuidof(IGameControllerBatteryInfo), (void**)&info)) && info &&
+        if (WgiVendor(vid) && SUCCEEDED(raw->QueryInterface(__uuidof(IGameControllerBatteryInfo), (void**)&info)) && info &&
             SUCCEEDED(info->TryGetBatteryReport(&report)) && report) {
             __FIReference_1_INT32 *rem = nullptr, *full = nullptr;
             report->get_RemainingCapacityInMilliwattHours(&rem);
@@ -86,12 +92,15 @@ int PollWgi(PollContext& ctx) {
                     }
                     Release(raw2);
                 }
+                // GIP reports a generic "Xbox One Game Controller" for third-party pads.
+                if (vid == 0x3537) s.name = L"GameSir controller";
                 s.kind = DeviceKind::Gamepad;
                 s.via = L"Xbox Wireless / Bluetooth";
                 s.percent = Clamp100(r * 100 / f);
                 s.charging = st == ABI::Windows::System::Power::BatteryStatus_Charging;
                 ctx.Add(s, vid, pid);
                 added++;
+                if (vid != 0x045E) thirdParty++;
             }
             Release(rem);
             Release(full);
@@ -130,22 +139,42 @@ void PollXInput(PollContext& ctx) {
     // An Xbox controller on Bluetooth may already be listed with a real percentage.
     bool btXbox = false;
     for (auto& s : ctx.out) btXbox |= s.via == L"Bluetooth" && s.name.find(L"Xbox") != std::wstring::npos;
-    int precise = btXbox ? 0 : PollWgi(ctx);
+    int thirdParty = 0;
+    int precise = btXbox ? 0 : PollWgi(ctx, thirdParty);
+    // GameSir pads answer XInput's headset query with their own battery ("Full") even with nothing
+    // plugged in, so skip headsets when every precisely shown controller is third-party.
+    bool skipHeadset = precise > 0 && thirdParty == precise;
 
     const XInputApi& api = LoadXInput();
     if (!api.battery || !api.state) return;
+    auto query = [&](DWORD user, BYTE type, XINPUT_BATTERY_INFORMATION& bi) {
+        bi = {};
+        return api.battery(user, type, &bi) == ERROR_SUCCESS && bi.BatteryType != BATTERY_TYPE_DISCONNECTED &&
+               bi.BatteryType != BATTERY_TYPE_WIRED;
+    };
     for (DWORD user = 0; user < 4; user++) {
         // The Xbox Wireless adapter answers battery queries for empty slots too (one controller
         // showed up as four "Medium" headsets), so only look at slots with a controller connected.
         XINPUT_STATE state{};
         if (api.state(user, &state) != ERROR_SUCCESS) continue;
+        XINPUT_BATTERY_INFORMATION pad{};
+        const bool hasPad = query(user, BATTERY_DEVTYPE_GAMEPAD, pad);
         for (BYTE type : { (BYTE)BATTERY_DEVTYPE_GAMEPAD, (BYTE)BATTERY_DEVTYPE_HEADSET }) {
             if (type == BATTERY_DEVTYPE_GAMEPAD && (btXbox || precise > 0)) continue;  // already shown precisely
+            if (type == BATTERY_DEVTYPE_HEADSET && skipHeadset) continue;
             XINPUT_BATTERY_INFORMATION bi{};
-            if (api.battery(user, type, &bi) != ERROR_SUCCESS) continue;
-            if (bi.BatteryType == BATTERY_TYPE_DISCONNECTED || bi.BatteryType == BATTERY_TYPE_WIRED) continue;
-            // Without a headset plugged in, the headset query can still answer with an unknown type.
-            if (type == BATTERY_DEVTYPE_HEADSET && bi.BatteryType == BATTERY_TYPE_UNKNOWN) continue;
+            if (type == BATTERY_DEVTYPE_GAMEPAD) {
+                if (!hasPad) continue;
+                bi = pad;
+            } else {
+                if (!query(user, type, bi)) continue;
+                // Without a headset plugged in, the headset query can still answer with an unknown type.
+                if (bi.BatteryType == BATTERY_TYPE_UNKNOWN) continue;
+                // Xbox One / Series controllers echo their own battery back for the headset query (the
+                // phantom headsets all read "Medium", same as the controller). Headsets on these
+                // controllers are powered by the controller, so a mirrored answer is not a headset.
+                if (hasPad && bi.BatteryType == pad.BatteryType && bi.BatteryLevel == pad.BatteryLevel) continue;
+            }
             DeviceStatus s;
             s.key = L"xinput:" + std::to_wstring(user) + L":" + std::to_wstring(type);
             s.name = type == BATTERY_DEVTYPE_GAMEPAD ? L"Xbox controller " + std::to_wstring(user + 1) : L"Xbox headset";

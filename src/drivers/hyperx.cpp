@@ -164,7 +164,9 @@ const Model kModels[] = {
     { 0x03F0, { 0x05B7, 0x0C9D }, [](const HidColl& c) { return c.outLen() == 62 && c.inLen() == 62; }, Cloud3 },
     // Cloud II Core Wireless: same 66 <cmd> protocol as Cloud III Wireless, 64-byte reports (HyperHeadset).
     { 0x03F0, { 0x069F, 0x0995 }, [](const HidColl& c) { return c.page() >= 0xFF00 && c.outLen() >= 62 && c.inLen() >= 62; }, Cloud3 },
-    { 0x03F0, { 0x06BE, 0x02CC }, [](const HidColl& c) { return c.page() >= 0xFF00 && c.outLen() >= 7; }, Cloud3S },
+    // Cloud III S: report 0C lives on the 64/64-byte collection, which Windows lists under usage page 01C0
+    // (not a vendor page). The FF13 (62-byte) and FFC0 (32-byte) collections don't carry it.
+    { 0x03F0, { 0x06BE, 0x02CC }, [](const HidColl& c) { return c.outLen() == 64 && c.inLen() == 64; }, Cloud3S },
     { 0x03F0, { 0x0696, 0x018B, 0x0D93 }, [](const HidColl& c) { return c.page() == 0xFF90 && c.usage() == 0x0303; }, Cloud2 },
     { 0x0951, { 0x1718 }, [](const HidColl& c) { return c.outLen() == 62; }, Cloud2Kingston },
     { 0x03F0, { 0x098D }, [](const HidColl& c) { return c.page() >= 0xFF00 && c.outLen() >= 3; }, CloudAlpha },

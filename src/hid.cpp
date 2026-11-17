@@ -52,6 +52,14 @@ bool HidDev::Open(const HidColl& c) {
     return ok();
 }
 
+bool HidDev::OpenReadOnly(const HidColl& c) {
+    Close();
+    c_ = c;
+    h_ = CreateFileW(c.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    overlapped_ = true;
+    return ok();
+}
+
 bool HidDev::OpenFeatureOnly(const HidColl& c) {
     Close();
     c_ = c;
@@ -103,6 +111,31 @@ int HidDev::Read(std::vector<BYTE>& buf, int timeoutMs) {
     CloseHandle(ov.hEvent);
     if (!done || got == 0) return -1;
     size_t off = tmp[0] == 0 ? 1 : 0;  // hidapi semantics: drop the "no report ID" byte
+    buf.assign(tmp.begin() + off, tmp.begin() + got);
+    return (int)buf.size();
+}
+
+int HidDev::SetOutputAndRead(const std::vector<BYTE>& data, std::vector<BYTE>& buf, int timeoutMs) {
+    if (!ok() || !overlapped_ || !c_.inLen() || !c_.outLen() || data.empty()) return -1;
+    std::vector<BYTE> out(c_.outLen(), 0);
+    memcpy(out.data(), data.data(), std::min(out.size(), data.size()));
+    std::vector<BYTE> tmp(c_.inLen(), 0);
+    OVERLAPPED ov{};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    DWORD got = 0;
+    bool done = false;
+    if (ReadFile(h_, tmp.data(), (DWORD)tmp.size(), nullptr, &ov) || GetLastError() == ERROR_IO_PENDING) {
+        bool sent = HidD_SetOutputReport(h_, out.data(), (ULONG)out.size()) != FALSE;
+        if (sent && timeoutMs > 0 && WaitForSingleObject(ov.hEvent, (DWORD)timeoutMs) == WAIT_OBJECT_0) {
+            done = GetOverlappedResult(h_, &ov, &got, FALSE) != FALSE;
+        } else {
+            CancelIo(h_);
+            done = GetOverlappedResult(h_, &ov, &got, TRUE) != FALSE && sent;
+        }
+    }
+    CloseHandle(ov.hEvent);
+    if (!done || got == 0) return -1;
+    size_t off = tmp[0] == 0 ? 1 : 0;
     buf.assign(tmp.begin() + off, tmp.begin() + got);
     return (int)buf.size();
 }

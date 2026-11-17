@@ -4,7 +4,7 @@ WINDRES  ?= windres
 CXXFLAGS ?= -std=c++17 -Os -Wall -Wno-missing-field-initializers -ffunction-sections -fdata-sections \
             -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
 LDFLAGS  ?= -municode -mwindows -static -s -Wl,--gc-sections
-LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -lcomctl32 -lgdi32 -lruntimeobject
+LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -loleaut32 -lcomctl32 -lgdi32 -lruntimeobject -lws2_32
 
 SRC := $(wildcard src/*.cpp) $(wildcard src/drivers/*.cpp)
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC)) build/app_res.o
@@ -35,5 +35,9 @@ test:
 	./build/readuntil_backoff_test.exe
 	$(CXX) $(CXXFLAGS) tests/hid_helpers_test.cpp src/hid.cpp -o build/hid_helpers_test.exe -lhid -lsetupapi
 	./build/hid_helpers_test.exe
+	$(CXX) $(CXXFLAGS) tests/ninjutso_driver_test.cpp src/drivers/ninjutso.cpp -o build/ninjutso_driver_test.exe
+	./build/ninjutso_driver_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/galaxy_buds_protocol_test.cpp -o build/galaxy_buds_protocol_test.exe
+	./build/galaxy_buds_protocol_test.exe
 
 .PHONY: clean test

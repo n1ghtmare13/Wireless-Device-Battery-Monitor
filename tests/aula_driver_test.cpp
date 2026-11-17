@@ -62,7 +62,7 @@ bool HidDev::Write(const std::vector<BYTE>& data, int timeoutMs) {
     return true;
 }
 int HidDev::Read(std::vector<BYTE>& out, int timeoutMs) {
-    assert(ok() && timeoutMs > 0 && timeoutMs <= 1000);
+    assert(ok() && timeoutMs > 0 && timeoutMs <= 1300);
     const auto& sent = requests[c_.path];
     if (sent.empty()) return -1;
     auto& scripted = reports[c_.path];
@@ -115,7 +115,7 @@ int main() {
     assert(ctx.out[0].kind == DeviceKind::Keyboard && ctx.out[1].kind == DeviceKind::Keyboard);
     assert(ctx.IsClaimed(0x3554, 0xFA09));
 
-    // Silence triggers two battery attempts, then skips the path on the next poll.
+    // Silence triggers three battery attempts, then skips the path on the next poll.
     auto silent = Collection(L"eeee");
     ctx = {};
     ctx.colls = { silent };
@@ -123,13 +123,13 @@ int main() {
     PollAula(ctx);
     assert(ctx.out.empty() && ctx.claimed.empty());
     assert(opens[silent.path] == 1);
-    assert(RequestCount(silent, 0x07) == 1 && RequestCount(silent, 0x4A) == 2);
+    assert(RequestCount(silent, 0x07) == 1 && RequestCount(silent, 0x4A) == 3);
     ctx = {};
     ctx.colls = { silent };
     PollAula(ctx);
     assert(ctx.out.empty() && ctx.claimed.empty());
     assert(opens[silent.path] == 1);
-    assert(RequestCount(silent, 0x07) == 1 && RequestCount(silent, 0x4A) == 2);
+    assert(RequestCount(silent, 0x07) == 1 && RequestCount(silent, 0x4A) == 3);
 
     // Older firmware can ignore link status while still reporting a valid battery level.
     auto legacy = Collection(L"ffff");

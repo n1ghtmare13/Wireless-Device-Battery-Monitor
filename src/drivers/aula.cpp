@@ -10,8 +10,14 @@
 // alone does not identify the reply.
 // Every AULA keyboard ships with its own receiver and they all enumerate as 3554:FA09, so each
 // receiver is queried on its own and keyed by its device instance.
-// From github.com/PyFlat/Device-Battery-Info (PR 6), github.com/deepan-alve/womier-l65-linux and
-// OpenRGB issue 5166 (frame layout, 0x07 sent first by the OEM software).
+// A keyboard that is dozing or has just switched to 2.4 GHz leaves the first battery request
+// unanswered (one F75 capture timed out at exactly 1 s), so it is sent up to three times, ~1.3 s
+// apart. Byte 2 alternates between 00 (PyFlat, sanshoku captures on the F75) and 01 (the "packet
+// count" the Womier L65 tool sends on the same receiver); the reply is identified by command and
+// checksum either way.
+// From github.com/PyFlat/Device-Battery-Info (PR 6), github.com/deepan-alve/womier-l65-linux
+// (windows/l65w.ps1), github.com/ushineko/sanshoku issue 36 and OpenRGB issue 5166 (frame layout,
+// 0x07 sent first by the OEM software).
 #include "drivers.h"
 
 #include <cwctype>
@@ -20,7 +26,8 @@ namespace {
 
 constexpr BYTE kLinkStatus = 0x07;
 constexpr BYTE kBattery = 0x4A;
-constexpr int kReplyTimeoutMs = 1000;
+constexpr int kReplyTimeoutMs = 1300;  // also the battery resend interval
+constexpr int kBatteryAttempts = 3;
 
 // A receiver whose keyboard does not answer is retried after this long instead of every poll.
 Backoff g_retry(3 * 60 * 1000);
@@ -75,8 +82,9 @@ void PollAula(PollContext& ctx) {
             g_retry.Succeeded(c->path);
             continue;
         }
-        // The first request can go unanswered while the 2.4 GHz link wakes up; retry once.
-        if (!Command(d, kBattery, 0x00, r) && !Command(d, kBattery, 0x00, r)) {
+        bool answered = false;
+        for (int i = 0; i < kBatteryAttempts && !answered; i++) answered = Command(d, kBattery, (BYTE)(i & 1), r);
+        if (!answered) {
             g_retry.Failed(c->path);
             continue;
         }

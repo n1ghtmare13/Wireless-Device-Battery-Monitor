@@ -29,7 +29,10 @@ constexpr int LOW_BATTERY = 15;
 constexpr UINT PLACEHOLDER_ID = 1;
 constexpr UINT ALERT_ID = 2;  // temporary icon carrying the low-battery warning in widget mode
 
-enum MenuId : UINT { ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_DEVICE_FIRST = 1000 };
+enum MenuId : UINT {
+    ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY,
+    ID_DEVICE_FIRST = 1000
+};
 
 const wchar_t* kAppName = L"Wireless Battery";
 const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -45,6 +48,7 @@ bool g_lightTaskbar;
 bool g_wantWidget = true;      // user's choice: taskbar widget (default) or tray icons
 bool g_useWidget = false;      // what is actually shown right now
 bool g_hideLastKnown = false;  // hide (last known) / asleep devices from taskbar and tray
+bool g_widgetBackground = false;  // draw a plate behind the taskbar text (transparent taskbar themes)
 
 struct TrayEntry {
     UINT uid = 0;
@@ -76,6 +80,16 @@ bool ReadLightTaskbar() {
                      L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &v, &sz) == ERROR_SUCCESS)
         return v != 0;
     return false;
+}
+
+void ApplyMenuTheme(bool light) {
+    using SetPreferredAppModeFn = int(WINAPI*)(int);
+    using FlushMenuThemesFn = void(WINAPI*)();
+    static HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static auto setMode = ux ? (SetPreferredAppModeFn)GetProcAddress(ux, MAKEINTRESOURCEA(135)) : nullptr;
+    static auto flush = ux ? (FlushMenuThemesFn)GetProcAddress(ux, MAKEINTRESOURCEA(136)) : nullptr;
+    if (setMode) setMode(light ? 3 : 2);
+    if (flush) flush();
 }
 
 std::wstring ExePath() {
@@ -125,6 +139,8 @@ bool LoadWidgetMode() { return LoadBoolSetting(L"TaskbarWidget", true); }
 void SaveWidgetMode(bool on) { SaveBoolSetting(L"TaskbarWidget", on); }
 bool LoadHideLastKnown() { return LoadBoolSetting(L"HideLastKnownDevices", false); }
 void SaveHideLastKnown(bool on) { SaveBoolSetting(L"HideLastKnownDevices", on); }
+bool LoadWidgetBackground() { return LoadBoolSetting(L"WidgetBackground", false); }
+void SaveWidgetBackground(bool on) { SaveBoolSetting(L"WidgetBackground", on); }
 
 bool AutostartEnabled() {
     wchar_t buf[MAX_PATH * 2];
@@ -271,6 +287,7 @@ std::wstring StatusText(const TrayEntry& e) {
     else if (s.percent >= 0) t = std::to_wstring(s.percent) + L"%";
     else if (e.lastPct >= 0) t = std::to_wstring(e.lastPct) + L"% (last known)";
     else t = L"unknown";
+    if (!s.detail.empty() && s.percent >= 0) t += L" (" + s.detail + L")";
     if (s.charging) t += L", charging";
     if (s.asleep) t += L", asleep";
     return t;
@@ -380,7 +397,8 @@ int KindOrder(DeviceKind k) {  // headset first, then mouse, ... (matches the le
         case DeviceKind::Mouse:    return 1;
         case DeviceKind::Keyboard: return 2;
         case DeviceKind::Gamepad:  return 3;
-        default:                   return 4;
+        case DeviceKind::Phone:    return 4;
+        default:                   return 5;
     }
 }
 
@@ -475,6 +493,12 @@ void SetMode(bool useWidget) {
     Reconcile();
 }
 
+void SetWidgetBackground(bool on) {
+    g_widgetBackground = on;
+    SaveWidgetBackground(on);
+    widget::SetBackground(on);
+}
+
 void SetHideLastKnown(bool on) {
     g_hideLastKnown = on;
     SaveHideLastKnown(on);
@@ -501,6 +525,7 @@ void RedrawAll() {
 }
 
 void ShowMenu() {
+    ApplyMenuTheme(g_lightTaskbar);
     HMENU m = CreatePopupMenu();
     std::vector<std::wstring> keys;  // menu id ID_DEVICE_FIRST + i -> device key
     if (g_entries.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"No devices with battery info found");
@@ -515,6 +540,8 @@ void ShowMenu() {
     AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, L"Show on the taskbar (icon + percentage)");
     AppendMenuW(m, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, L"Show as tray icons");
     CheckMenuRadioItem(m, ID_MODE_WIDGET, ID_MODE_TRAY, g_wantWidget ? ID_MODE_WIDGET : ID_MODE_TRAY, MF_BYCOMMAND);
+    UINT bgFlags = MF_STRING | (g_widgetBackground ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED);
+    AppendMenuW(m, bgFlags, ID_WIDGET_BACKGROUND, L"Background behind taskbar text (for transparent taskbars)");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_REFRESH, L"Refresh now");
     AppendMenuW(m, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
@@ -530,6 +557,7 @@ void ShowMenu() {
         case ID_REFRESH: SetEvent(g_refreshEvt); break;
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
+        case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MODE_WIDGET: SetMode(true); break;
         case ID_MODE_TRAY: SetMode(false); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
@@ -601,7 +629,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) {
                 bool light = ReadLightTaskbar();
-                if (light != g_lightTaskbar) { g_lightTaskbar = light; RedrawAll(); widget::SetLightTheme(light); }
+                if (light != g_lightTaskbar) { g_lightTaskbar = light; ApplyMenuTheme(light); RedrawAll(); widget::SetLightTheme(light); }
             }
             return 0;
         case WM_DESTROY:
@@ -647,6 +675,7 @@ int ListToConsole(bool dump) {
         else if (!s.levelText.empty()) line += s.levelText;
         else if (s.percent >= 0) line += std::to_wstring(s.percent) + L"%";
         else line += L"unknown";
+        if (!s.detail.empty()) line += L" (" + s.detail + L")";
         if (s.charging) line += L", charging";
         if (s.millivolts) line += L", " + std::to_wstring(s.millivolts) + L" mV";
         write(line + L"   (" + s.key + L")\n");
@@ -672,6 +701,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
     g_lightTaskbar = ReadLightTaskbar();
+    ApplyMenuTheme(g_lightTaskbar);
     g_taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW wc{ sizeof(wc) };
@@ -692,6 +722,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_stopEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_wantWidget = LoadWidgetMode();
     g_hideLastKnown = LoadHideLastKnown();
+    g_widgetBackground = LoadWidgetBackground();
+    widget::SetBackground(g_widgetBackground);  // remembered by the widget across re-creation
     LoadHidden();
     Reconcile();
     UpdatePlaceholder();  // something to click on until the first poll finishes

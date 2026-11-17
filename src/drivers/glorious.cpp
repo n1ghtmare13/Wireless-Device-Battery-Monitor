@@ -1,10 +1,12 @@
-// Glorious (VID 258A), Hitscan (VID 3770) and G-Wolves (VID 33E4) wireless mice using the same
+// Glorious, Hitscan, G-Wolves and WLMouse wireless mice using the same
 // supplier protocol (G-Wolves calls it "XVI"; its other models use the Kysona protocol instead):
 // Request: 64-byte feature report (id 0), bytes [3]=02 [4]=02 [6]=83.
 // Reply:   [1]=status, [4]=02, [6]=83, [7]=charging (1), [8]=percent.
 // Status A1 = awake, A4 = asleep, A0 = waking up, others = unreachable.
 // Protocol: github.com/ikajdan/glorious-indicator, github.com/louis4craft/glorious-ctl,
 // Hitscan's web configurator (control.hitscan.com) and G-Wolves' (mouse.xyz, Config/env-models.json).
+// WLMouse's YING IDs: https://gm.wlmouse.gg/Config/env-models.json. The 1K dongle is shared
+// with other models; only the YING 8K receiver and its battery collection are matched here.
 #include "drivers.h"
 
 // Model names and cable product ids from G-Wolves' own device list (mouse.xyz/Config/env-models.json).
@@ -61,6 +63,7 @@ struct Vendor {
     int replyDelayMs;
     const wchar_t* (*name)(USHORT pid);
     bool (*isCable)(USHORT pid);
+    bool (*matches)(const HidColl&) = nullptr;
 };
 
 const wchar_t* GloriousName(USHORT pid) {
@@ -101,6 +104,8 @@ const Vendor kVendors[] = {
     { 0x258A, L"glorious:", 50, GloriousName, GloriousCable },
     { 0x3770, L"hitscan:", 200, HitscanName, HitscanCable },
     { 0x33E4, L"gwolves:", 100, GWolvesModelName, GWolvesIsCable },
+    { 0x36A7, L"wlmouse:", 100, [](USHORT) { return L"WLMouse YING"; }, [](USHORT) { return false; },
+      [](const HidColl& c) { return c.pid == 0xA874 && c.page() == 0xFFFF && c.usage() == 0; } },
 };
 
 }  // namespace
@@ -108,7 +113,9 @@ const Vendor kVendors[] = {
 void PollGlorious(PollContext& ctx) {
     for (const Vendor& v : kVendors) {
         for (auto [vid, pid] : ctx.Products(v.vid)) {
-            for (const HidColl* c : ctx.Find(vid, pid, [](const HidColl& c) { return c.featLen() == 65; })) {
+            for (const HidColl* c : ctx.Find(vid, pid, [&v](const HidColl& c) {
+                     return c.featLen() == 65 && (!v.matches || v.matches(c));
+                 })) {
                 HidDev d;
                 if (!d.OpenFeatureOnly(*c)) continue;
                 std::vector<BYTE> r;
@@ -120,8 +127,8 @@ void PollGlorious(PollContext& ctx) {
                     Sleep(v.replyDelayMs);
                     if (!d.GetFeature(0, r) || r.size() < 9) break;
                     if (r[6] != 0x83 || (r[1] & 0xF0) != 0xA0) break;  // not this protocol
-                    ok = true;
                     if (r[1] == 0xA0 && attempt == 0) { Sleep(400); continue; }  // waking up: ask again
+                    ok = true;
                     break;
                 }
                 if (!ok) continue;

@@ -1,6 +1,7 @@
 #include "widget.h"
 
 #include <commctrl.h>
+#include <uiautomation.h>
 #include <algorithm>
 
 namespace {
@@ -8,10 +9,12 @@ namespace {
 HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
 UINT g_clickMsg;
 bool g_light, g_hover;
+bool g_background;  // opaque rounded plate behind the text, for transparent / restyled taskbars
 std::vector<WidgetItem> g_items;
 std::wstring g_tipText;
-RECT g_lastTray{}, g_lastBar{};
-int g_lastW = -1, g_lastDpi = 0;
+RECT g_lastTray{}, g_lastBar{}, g_lastWidgets{};
+IUIAutomationElement* g_widgetsBtn;
+int g_lastW = -1, g_lastDpi = 0, g_lastLeft = -1;
 SIZE g_size{};
 
 const wchar_t* kClass = L"WirelessBatteryWidget";
@@ -22,12 +25,64 @@ int Dpi() {
 }
 int Px(int v) { return MulDiv(v, Dpi(), 96); }
 
+// Windows 11 puts the Widgets (weather) button right next to the tray when the taskbar is
+// left-aligned (start-aligned on right-to-left Windows). It is XAML, so only UI Automation knows
+// where it is. The element is looked up once per taskbar; its rectangle is re-read at most every
+// few seconds because the weather text changes its width.
+RECT WidgetsButtonRect() {
+    static IUIAutomation* uia = nullptr;
+    static ULONGLONG last = 0;
+    static RECT cached{};
+    ULONGLONG now = GetTickCount64();
+    if (last && now - last < 5000) return cached;
+    last = now;
+    cached = {};
+    if (!uia) {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // UI thread; harmless if already initialised
+        if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, __uuidof(IUIAutomation), (void**)&uia)))
+            return cached;
+    }
+    if (!g_widgetsBtn) {
+        IUIAutomationElement* root = nullptr;
+        IUIAutomationCondition* cond = nullptr;
+        VARIANT id;
+        VariantInit(&id);
+        id.vt = VT_BSTR;
+        id.bstrVal = SysAllocString(L"WidgetsButton");
+        if (SUCCEEDED(uia->ElementFromHandle(g_taskbar, &root)) && root &&
+            SUCCEEDED(uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, id, &cond)) && cond)
+            root->FindFirst(TreeScope_Descendants, cond, &g_widgetsBtn);
+        VariantClear(&id);
+        if (cond) cond->Release();
+        if (root) root->Release();
+        if (!g_widgetsBtn) return cached;
+    }
+    if (FAILED(g_widgetsBtn->get_CurrentBoundingRectangle(&cached))) {
+        g_widgetsBtn->Release();  // stale (Widgets turned off, Explorer restarted): look it up again next time
+        g_widgetsBtn = nullptr;
+        cached = {};
+    }
+    return cached;
+}
+
+void ApplyTipTheme() {
+    if (!g_tip) return;
+    using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+    static HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static auto setTheme = ux ? (SetWindowThemeFn)GetProcAddress(ux, "SetWindowTheme") : nullptr;
+    if (setTheme) {
+        setTheme(g_tip, g_light ? L"Explorer" : L"DarkMode_Explorer", nullptr);
+        SendMessageW(g_tip, WM_THEMECHANGED, 0, 0);
+    }
+}
+
 wchar_t Glyph(DeviceKind k, bool bluetooth) {
     switch (k) {
         case DeviceKind::Headset:  return 0xE7F6;  // Headphone
         case DeviceKind::Mouse:    return 0xE962;  // Mouse
         case DeviceKind::Keyboard: return 0xE765;  // KeyboardClassic
         case DeviceKind::Gamepad:  return 0xE7FC;  // Game
+        case DeviceKind::Phone:    return 0xE8EA;  // CellPhone
         default:                   return bluetooth ? 0xE702 : 0xE772;  // Bluetooth / Devices
     }
 }
@@ -160,17 +215,18 @@ void Paint() {
     // Nearly transparent background so the whole strip receives mouse input,
     // plus a rounded hover highlight like the system tray icons have.
     for (auto& p : cv.px) p = 0x01000000;
-    if (g_hover) {
-        int inset = Px(4), r = Px(4);
-        Rgb hc = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
-        int ha = g_light ? 20 : 26;
+    auto roundRect = [&](int inset, int r, Rgb c, int a) {
         for (int y = inset; y < H - inset; y++)
             for (int x = 0; x < W; x++) {
                 int dx = x < r ? r - x : (x >= W - r ? x - (W - r - 1) : 0);
                 int dy = y < inset + r ? inset + r - y : (y >= H - inset - r ? y - (H - inset - r - 1) : 0);
-                if (dx * dx + dy * dy <= r * r) cv.Blend(x, y, hc, ha);
+                if (dx * dx + dy * dy <= r * r) cv.Blend(x, y, c, a);
             }
-    }
+    };
+    // Optional plate in the taskbar's own colours: keeps the text readable when a taskbar theme
+    // (e.g. Windhawk's Taskbar Styler) makes the bar transparent over the wallpaper.
+    if (g_background) roundRect(Px(4), Px(6), g_light ? Rgb{ 243, 243, 243 } : Rgb{ 32, 32, 32 }, 240);
+    if (g_hover) roundRect(Px(4), Px(4), g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }, g_light ? 20 : 26);
 
     int x = Px(8);
     for (auto& p : pieces) {
@@ -262,6 +318,7 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
     g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
                             notifyWnd, nullptr, inst, nullptr);
     if (g_tip) {
+        ApplyTipTheme();
         TTTOOLINFOW ti{ sizeof(ti) };
         ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
         ti.hwnd = notifyWnd;
@@ -286,6 +343,7 @@ void Destroy() {
         PostMessageW(g_taskbar, WM_SIZE, SIZE_RESTORED, MAKELPARAM(r.right, r.bottom));
     }
     g_rebar = nullptr;
+    if (g_widgetsBtn) { g_widgetsBtn->Release(); g_widgetsBtn = nullptr; }
     if (g_tip) { DestroyWindow(g_tip); g_tip = nullptr; }
     if (g_wnd) { DestroyWindow(g_wnd); g_wnd = nullptr; }
     g_taskbar = nullptr;
@@ -310,6 +368,12 @@ void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip)
 
 void SetLightTheme(bool light) {
     g_light = light;
+    ApplyTipTheme();
+    Paint();
+}
+
+void SetBackground(bool on) {
+    g_background = on;
     Paint();
 }
 
@@ -321,15 +385,39 @@ bool Reposition() {
     RECT tr, bar;
     GetWindowRect(tray, &tr);
     GetWindowRect(g_taskbar, &bar);
-    POINT p{ tr.left, bar.top };
+    // Right-to-left Windows (Hebrew, Arabic) mirrors the taskbar: client x runs from the screen's right
+    // edge, so a window's client-space left edge is its screen-space right edge.
+    bool rtl = GetWindowLongW(g_taskbar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL;
+    int edge = rtl ? tr.right : tr.left;  // screen x we sit next to
+    // Windows 10: News and Interests / Weather sits in ShellFeedsTaskbarViewWindow immediately left of the tray.
+    HWND feeds = FindWindowExW(g_taskbar, nullptr, L"ShellFeedsTaskbarViewWindow", nullptr);
+    if (!rtl && feeds && IsWindowVisible(feeds)) {
+        RECT fr;
+        GetWindowRect(feeds, &fr);
+        if (fr.left < edge && fr.right > fr.left) edge = fr.left;
+    }
+    // Step past the Widgets button when it sits where we would go.
+    RECT wb = WidgetsButtonRect();
+    if (wb.right > wb.left && wb.top < bar.bottom && wb.bottom > bar.top &&
+        (rtl ? wb.left < edge + g_size.cx + Px(2) && wb.right > edge : wb.right > edge - g_size.cx - Px(2) && wb.left < edge))
+        edge = rtl ? wb.right : wb.left;
+    POINT p{ edge, bar.top };
     ScreenToClient(g_taskbar, &p);
     int left = p.x - g_size.cx - Px(2);
+
+
+    // Optional user override in DPI-independent pixels (e.g. for custom padding).
+    DWORD customOffset = 0, sz = sizeof(customOffset);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset",
+                     RRF_RT_REG_DWORD, nullptr, &customOffset, &sz) == ERROR_SUCCESS) {
+        left -= Px((int)customOffset);
+    }
 
     // Windows 10: Explorer re-expands the task buttons on its own layout passes; narrow them again.
     if (g_rebar && IsWindow(g_rebar)) {
         RECT rr;
         GetWindowRect(g_rebar, &rr);
-        POINT tl{ rr.left, rr.top };
+        POINT tl{ rtl ? rr.right : rr.left, rr.top };
         ScreenToClient(g_taskbar, &tl);
         if (tl.x + (rr.right - rr.left) > left && left > tl.x)
             MoveWindow(g_rebar, tl.x, tl.y, left - tl.x, rr.bottom - rr.top, TRUE);
@@ -337,10 +425,14 @@ bool Reposition() {
 
     // Keep us above the taskbar's own content (our sibling windows).
     bool covered = GetWindow(g_wnd, GW_HWNDPREV) != nullptr;
-    if (!covered && EqualRect(&tr, &g_lastTray) && EqualRect(&bar, &g_lastBar) && g_lastW == g_size.cx) return true;
+    if (!covered && EqualRect(&tr, &g_lastTray) && EqualRect(&bar, &g_lastBar) && EqualRect(&wb, &g_lastWidgets) &&
+        g_lastW == g_size.cx && g_lastLeft == left)
+        return true;
     g_lastTray = tr;
+    g_lastWidgets = wb;
     g_lastBar = bar;
     g_lastW = g_size.cx;
+    g_lastLeft = left;
     SetWindowPos(g_wnd, HWND_TOP, left, 0, g_size.cx, g_size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     return true;
 }

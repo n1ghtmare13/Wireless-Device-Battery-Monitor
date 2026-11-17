@@ -12,15 +12,27 @@ std::vector<DeviceStatus> PollAllDevices() {
     ctx.colls = EnumHid();
     PollGlorious(ctx);
     PollAula(ctx);       // before Kysona, which shares the 3554 vendor id and would probe it first
+    PollDareu(ctx);
     PollAtkSerial(ctx);  // before Kysona, which shares the ATK vendor id
+    PollPulsar(ctx);     // before Kysona, which also scans the 3710 vendor id
+    PollAtkBitmouse(ctx);  // before Kysona, which would probe the NK dongle with the wrong protocol
     PollKysona(ctx);
     PollKeychron(ctx);
     PollLamzu(ctx);
+    PollEndgame(ctx);
+    PollWlmouse(ctx);
+    PollNinjutso(ctx);
     PollRongyuan(ctx);
+    PollSonix(ctx);
     PollSonyInzone(ctx);
+    PollFractal(ctx);
+    PollJabra(ctx);
     PollRog(ctx);
     PollZowie(ctx);
+    PollMchose(ctx);
     PollRapoo(ctx);
+    PollAreson(ctx);
+    PollMchoseG3(ctx);
     PollMiscMice(ctx);
     PollRazerHeadsets(ctx);  // before the generic Razer driver, which shares the vendor id
     PollHyperX(ctx);
@@ -30,10 +42,16 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollCorsair(ctx);
     PollCoolerMaster(ctx);
     PollPlayStation(ctx);
+    PollSteamController(ctx);
     PollGameSir(ctx);
+    PollFlydigi(ctx);
+    PollGameSirCyclone(ctx);
+    PollAirPods(ctx);  // before the Bluetooth fallback, which has no level for AirPods
+    PollPhoneLink(ctx);
+    PollGalaxyBuds(ctx);  // before the Bluetooth fallback, which skips devices already listed by name
     PollHeadsetControl(ctx);
+    PollBluetooth(ctx);   // before the generic HID check: Windows' own level wins for the same device
     PollGenericHid(ctx);
-    PollBluetooth(ctx);
     PollXInput(ctx);
     return ctx.out;
 }
@@ -46,5 +64,6 @@ std::wstring DumpHidCollections() {
                  c.featLen());
         out += line + HidProduct(c) + L"\n";
     }
+    out += DumpXentaFrames();
     return out;
 }

@@ -1,4 +1,4 @@
-// ASUS ROG wireless keyboards and mice (VID 0B05), including the ROG Omni Receiver (0B05:1ACE).
+// ASUS ROG wireless keyboards, mice and the ROG Pelta headset (VID 0B05), including the ROG Omni Receiver (0B05:1ACE).
 // Query: [report id][12][sub]   sub 01 = keyboard battery, sub 07 = mouse battery.
 // Reply: [report id][12][sub]...  keyboard: [6] % (Falchion: [11]), [9] == 1 charging
 //                                 mouse:    [5] level (x25 on older 0-4 gauges), [10] charging
@@ -7,6 +7,8 @@
 // Protocol and model table from github.com/SteveWang92/peripheral-battery-tray (rog-battery,
 // MIT, itself based on G-Helper) and github.com/1gcat/BatteryTool.
 #include "drivers.h"
+
+#include <set>
 
 #include <cwctype>
 
@@ -174,10 +176,71 @@ void PollOmni(PollContext& ctx, std::vector<std::wstring>& seen) {
     }
 }
 
+// ROG Pelta headset, 2.4 GHz dongle 0B05:1B84. Vendor collection FF00:0001 on interface 3, report
+// id CC, 64 bytes each way. That collection has no interrupt OUT pipe, so the query goes out as
+// HidD_SetOutputReport with a read already pending.
+//   CC 12 07 -> CC 12 07 00 00 [5] sleep min [6] battery % (FE = unknown) [7] low-battery alert %
+//   CC 12 08 -> CC 12 08 00 00 [5] 1 = charging
+// A sleeping or switched-off headset answers with FF AA in [5..6]. Unsolicited event reports
+// (CC 12 0E / 09 ...) are skipped by matching the echoed command byte.
+// Protocol from github.com/jimm0thy/pelta-control (MIT), github.com/B1Chat/BatteryWatch (MIT) and
+// github.com/TheWebDog/quiet-battery/issues/1.
+constexpr USHORT kPeltaPid = 0x1B84;
+
+Reply PeltaQuery(HidDev& d, BYTE cmd, std::vector<BYTE>& reply) {
+    d.Flush();
+    // The first answer after the headset reconnects can take ~750 ms.
+    ULONGLONG end = GetTickCount64() + 1200;
+    std::vector<BYTE> r;
+    int n = d.SetOutputAndRead({ 0xCC, 0x12, cmd }, r, 1200);
+    while (n >= 8) {
+        if (r[0] == 0xCC && r[1] == 0xFF && r[2] == 0xAA) return Reply::Asleep;
+        if (r[0] == 0xCC && r[1] == 0x12) {
+            if (r[5] == 0xFF && r[6] == 0xAA) return Reply::Asleep;
+            if (r[2] == cmd) { reply = r; return Reply::Ok; }
+        }
+        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
+        if (left <= 0) break;
+        n = d.Read(r, left);
+    }
+    return Reply::None;
+}
+
+void PollPelta(PollContext& ctx) {
+    if (ctx.IsClaimed(0x0B05, kPeltaPid)) return;
+    auto colls = ctx.Find(0x0B05, kPeltaPid, [](const HidColl& c) {
+        return c.iface == 3 && c.page() == 0xFF00 && c.usage() == 0x0001 && c.inLen() >= 8 && c.outLen() >= 8;
+    });
+    for (const HidColl* c : colls) {
+        HidDev d;
+        std::vector<BYTE> r;
+        if (!d.Open(*c)) continue;
+        Reply res = PeltaQuery(d, 0x07, r);
+        if (res == Reply::None) continue;
+        DeviceStatus s;
+        s.key = L"rog:" + Hex4(kPeltaPid) + L":hs";
+        s.name = L"ROG Pelta";
+        s.kind = DeviceKind::Headset;
+        s.via = L"2.4 GHz receiver";
+        if (res == Reply::Asleep) {
+            s.asleep = true;
+        } else {
+            if (r[6] <= 100) s.percent = r[6];
+            else s.asleep = true;  // FE = level not known yet
+            std::vector<BYTE> ch;
+            if (PeltaQuery(d, 0x08, ch) == Reply::Ok) s.charging = ch[5] == 1;
+        }
+        ctx.out.push_back(s);
+        ctx.Claim(0x0B05, kPeltaPid);
+        return;
+    }
+}
+
 }  // namespace
 
 void PollRog(PollContext& ctx) {
     std::vector<std::wstring> seen;  // one entry per device name (wired + receiver both present while charging)
+    PollPelta(ctx);
     PollOmni(ctx, seen);
     for (const Model& m : kModels) {
         if (ctx.IsClaimed(0x0B05, m.pid)) continue;
@@ -190,6 +253,11 @@ void PollRog(PollContext& ctx) {
             HidDev d;
             DeviceStatus s;
             if (!d.Open(*c) || !ReadModel(d, m, s)) continue;
+            // A receiver channel (e.g. the SpeedNova 8K receiver 1AD0) answers "asleep" when nothing is
+            // paired to it too, so a model is only shown there once it has really answered (issue #140).
+            static std::set<USHORT> awake;
+            if (m.reportId && s.asleep && !awake.count(m.pid)) continue;
+            if (m.reportId && !s.asleep) awake.insert(m.pid);
             AddOnce(ctx, seen, s);
             ctx.Claim(0x0B05, m.pid);
             break;

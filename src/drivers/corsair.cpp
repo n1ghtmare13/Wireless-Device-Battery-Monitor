@@ -3,7 +3,7 @@
 //    (0 offline, 1-2 ok, 4-5 charging). From github.com/Sapd/HeadsetControl.
 //  * "Bragi" devices (Virtuoso, Void V2, HS80 MAX, Slipstream mice/keyboards): wire bytes
 //    02 <target> 02 <property> = GET; reply [1] source, [2] 02, [3] status (0 ok), [4..7] value LE.
-//    Property 0F = battery (0..1000), 10 = charge state (1 charging, 3 full). Target 08 is the device
+//    Property 0F = battery (0..1000), 10 = charge state (1 charging, 3 full), 12 = product id (as in OpenRGB). Target 08 is the device
 //    or receiver itself, 09+ are devices paired to a receiver. GET is read-only; we never switch the
 //    device into software mode.
 #include "drivers.h"
@@ -14,7 +14,7 @@ namespace {
 
 const USHORT kVoidPids[] = { 0x1B1C, 0x1B27, 0x0A14, 0x0A16, 0x0A17, 0x0A1D, 0x0A1A, 0x1B2A, 0x1B23,
                              0x1B29, 0x0A55, 0x0A51, 0x0A52, 0x0A38, 0x0A4F, 0x0A2B, 0x0A75, 0x0A56 };
-const USHORT kBragiPids[] = { 0x2A08, 0x2A02, 0x0A97, 0x0A64, 0x0A62, 0x0A3E, 0x0A3D };
+const USHORT kBragiPids[] = { 0x2A08, 0x2A02, 0x0A97, 0x0A64, 0x0A62, 0x0A3E, 0x0A3D, 0x2B00 };
 
 bool Contains(const USHORT* b, size_t n, USHORT v) { return std::find(b, b + n, v) != b + n; }
 
@@ -42,24 +42,40 @@ public:
     explicit Bragi(const HidColl& c) : numbered_(c.outLen() == 64) { ok_ = d_.Open(c); }
     bool ok() const { return ok_; }
     // Returns true and sets `value` on success; `status` holds the reply status (0 = ok, 5 = no such property).
+    // Two framings exist. "Prefixed" (older Bragi): 02 <target> 02 <prop>, reply 02 <source> 02 <status> <value>.
+    // "Plain" (newer Slipstream receivers such as 1B1C:2B00, e.g. Scimitar Elite SE Wireless):
+    // 00 <target> 02 <prop> (report ID 0), reply <source> 02 <status> <value>. The first framing that answers
+    // is remembered for this handle.
     bool Get(BYTE target, BYTE prop, unsigned& value, int timeoutMs = 300) {
-        std::vector<BYTE> req = numbered_ ? std::vector<BYTE>{ 0x02, target, 0x02, prop } : std::vector<BYTE>{ 0x00, 0x02, target, 0x02, prop };
-        d_.Flush();
-        if (!d_.Write(req)) return false;
-        BYTE source = target == 0x08 ? 0x00 : 0x01;
-        std::vector<BYTE> r;
-        if (!d_.ReadUntil(r, timeoutMs, [&](const std::vector<BYTE>& r) {
-            return r.size() >= 8 && r[2] == 0x02 && r[1] == source;
-        })) return false;
-        if (r[3] != 0x00) return false;
-        value = r[4] | (r[5] << 8) | (r[6] << 16) | ((unsigned)r[7] << 24);
-        return true;
+        if (mode_ != Plain && GetFramed(false, target, prop, value, timeoutMs)) { mode_ = Prefixed; return true; }
+        if (mode_ == Prefixed) return false;
+        if (GetFramed(true, target, prop, value, timeoutMs)) { mode_ = Plain; return true; }
+        return false;
     }
 
 private:
+    bool GetFramed(bool plain, BYTE target, BYTE prop, unsigned& value, int timeoutMs) {
+        std::vector<BYTE> req;
+        if (plain) req = { 0x00, target, 0x02, prop };
+        else req = numbered_ ? std::vector<BYTE>{ 0x02, target, 0x02, prop } : std::vector<BYTE>{ 0x00, 0x02, target, 0x02, prop };
+        d_.Flush();
+        if (!d_.Write(req)) return false;
+        BYTE source = target == 0x08 ? 0x00 : 0x01;
+        size_t o = plain ? 0 : 1;  // offset of the source byte in the reply
+        std::vector<BYTE> r;
+        if (!d_.ReadUntil(r, timeoutMs, [&](const std::vector<BYTE>& x) {
+            return x.size() >= o + 7 && x[o + 1] == 0x02 && x[o] == source;  // skips notifications and other apps' replies
+        })) return false;
+        if (r[o + 2] != 0x00) return false;
+        value = r[o + 3] | (r[o + 4] << 8) | (r[o + 5] << 16) | ((unsigned)r[o + 6] << 24);
+        return true;
+    }
+
+    enum Mode { Unknown, Prefixed, Plain };
     HidDev d_;
     bool numbered_;
     bool ok_ = false;
+    Mode mode_ = Unknown;
 };
 
 }  // namespace
@@ -94,6 +110,13 @@ void PollCorsair(PollContext& ctx) {
                 s.key = L"corsair:" + Hex4(pid) + L":" + std::to_wstring(target);
                 s.name = product.empty() ? L"Corsair wireless device" : product;
                 s.kind = GuessKind(s.name);
+                // A receiver names itself, not the device behind it, and has mouse collections of its own.
+                // Property 12 is the paired device's product id (read-only); Corsair headsets use 0Axx.
+                unsigned devPid = 0;
+                if (target != 0x08 && b.Get(target, 0x12, devPid) && (devPid >> 8) == 0x0A) {
+                    s.kind = DeviceKind::Headset;
+                    if (product.find(L"Receiver") != std::wstring::npos) s.name = L"Corsair wireless headset";
+                }
                 if (s.kind == DeviceKind::Other) s.kind = KindFromCollections(ctx.colls, vid, pid);
                 s.via = target == 0x08 ? L"USB / Bluetooth" : L"Corsair receiver";
                 s.percent = Clamp100((int)(level + 5) / 10);

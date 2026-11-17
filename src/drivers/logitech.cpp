@@ -179,6 +179,19 @@ void ReadNameAndType20(Hidpp& h, BYTE idx, DeviceStatus& s) {
     if (h.Call(idx, f, 2, {}, p) && !p.empty()) s.kind = KindFromType(p[0]);
 }
 
+// DEVICE_INFORMATION (0x0003) getDeviceInfo: [entity count][unit id x4][transport x2][model id x6]...
+// The unit id identifies the physical device, so a mouse keeps one entry whether it is reached
+// through its receiver or directly over its charging cable (where it shows up under another
+// product id and device index). Returns an empty string if the device does not report one.
+std::wstring ReadUnitId20(Hidpp& h, BYTE idx) {
+    BYTE f = h.FeatureIndex(idx, 0x0003);
+    if (!f) return L"";
+    std::vector<BYTE> p;
+    if (!h.Call(idx, f, 0, {}, p) || p.size() < 5) return L"";
+    if (!p[1] && !p[2] && !p[3] && !p[4]) return L"";
+    return Hex4((USHORT)((p[1] << 8) | p[2])) + Hex4((USHORT)((p[3] << 8) | p[4]));
+}
+
 // HID++ 1.0 devices: register 0x0D (battery %) or 0x07 (battery level 1..7).
 bool ReadBattery10(Hidpp& h, BYTE idx, DeviceStatus& s) {
     std::vector<BYTE> p;
@@ -218,7 +231,14 @@ void PollLogitech(PollContext& ctx) {
         std::vector<BYTE> p;
         BYTE err = 0;
         std::vector<BYTE> indices;
-        if (!isReceiver && h.Request(0xFF, 0x00, 0x10 | kSwId, { 0, 0, 0x5A }, p, err, false, 400) == 1 && p.size() >= 3 && p[0] >= 2)
+        // A Bluetooth HID path (HOGP service 1812, classic HID 1124) is always a direct link. A sleepy
+        // Bluetooth mouse can miss the 400 ms ping; probing it as a receiver then answers on every
+        // index and lists the same mouse six times.
+        std::wstring path = (longs.empty() ? shorts[0] : longs[0])->path;
+        for (auto& ch : path) ch = towlower(ch);
+        bool bluetooth = path.find(L"{00001812-") != std::wstring::npos || path.find(L"{00001124-") != std::wstring::npos;
+        if (bluetooth ||
+            (!isReceiver && h.Request(0xFF, 0x00, 0x10 | kSwId, { 0, 0, 0x5A }, p, err, false, 400) == 1 && p.size() >= 3 && p[0] >= 2))
             indices = { 0xFF };
         else
             indices = { 1, 2, 3, 4, 5, 6 };
@@ -237,6 +257,13 @@ void PollLogitech(PollContext& ctx) {
             if (r == 1 && p.size() >= 3 && p[0] >= 2) {
                 ReadNameAndType20(h, idx, s);
                 found = ReadBattery20(h, idx, pid, s);
+                std::wstring unit = found ? ReadUnitId20(h, idx) : L"";
+                if (!unit.empty()) {
+                    s.key = L"logi:unit:" + unit;
+                    // Unplugging the cable hands a receiver device back to its receiver; keep the
+                    // entry for a minute so it does not blink out while the link comes back.
+                    if (idx == 0xFF) s.graceSec = 60;
+                }
                 if (found && s.kind == DeviceKind::Other && longs.size() && longs[0]->page() == 0xFF43) s.kind = DeviceKind::Headset;
             } else if (r == 0 && err == 0x01) {  // "invalid sub id": a HID++ 1.0 device
                 found = ReadBattery10(h, idx, s);
