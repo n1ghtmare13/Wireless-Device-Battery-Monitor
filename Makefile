@@ -76,5 +76,7 @@ test:
 	./build/labels_test.exe
 	$(CXX) $(CXXFLAGS) tests/brands_test.cpp src/brands.cpp -o build/brands_test.exe
 	./build/brands_test.exe
+	$(CXX) -std=c++17 -O2 -Wall -Isrc tests/freespot_test.cpp -o build/freespot_test.exe
+	./build/freespot_test.exe
 
 .PHONY: clean test
