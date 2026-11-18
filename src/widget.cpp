@@ -1,5 +1,6 @@
 #include "widget.h"
 
+#include "freespot.h"
 #include "i18n.h"
 
 #include <commctrl.h>
@@ -31,6 +32,7 @@ struct Mirror {
     SIZE size{};
     int dpi = 0;
     int lastLeft = INT_MIN;  // client x it was last placed at; INT_MIN = not placed (hidden)
+    int anchor = 0;          // client x of its right end with no TaskbarOffset (for dragging)
 };
 std::vector<Mirror> g_mirrors;
 // Which taskbars show the strip: "all", "main", or one monitor's id (MonitorId), e.g. only monitor 3.
@@ -48,6 +50,21 @@ int Dpi() {
     return d ? (int)d : 96;
 }
 int Px(int v) { return MulDiv(v, Dpi(), 96); }
+
+// The strip can be dragged along the taskbar with the left button. The distance from its default spot
+// (left of the tray / clock; above the tray on a vertical taskbar) is saved as TaskbarOffset, in
+// DPI-independent pixels; while a drag runs, g_dragOffset (physical pixels) is used instead.
+const wchar_t* kRegKey = L"Software\\WirelessBattery";
+bool g_pressed, g_dragging;
+int g_dragStart, g_dragGrab, g_dragOffset;  // cursor at press, strip end minus cursor, live offset
+
+int OffsetPx() {
+    if (g_dragging) return g_dragOffset;
+    DWORD v = 0, sz = sizeof(v);
+    return RegGetValueW(HKEY_CURRENT_USER, kRegKey, L"TaskbarOffset", RRF_RT_REG_DWORD, nullptr, &v, &sz) == ERROR_SUCCESS
+               ? Px((int)v)
+               : 0;
+}
 
 // Windows 11 puts the Widgets (weather) button right next to the tray when the taskbar is
 // left-aligned (start-aligned on right-to-left Windows). It is XAML, so only UI Automation knows
@@ -78,6 +95,8 @@ struct Span {
 };
 std::vector<Span> g_spans;   // guarded by g_wbLock
 bool g_wbMirrors;            // guarded by g_wbLock: measure secondary taskbars too
+std::vector<RECT> g_obstacles;  // guarded by g_wbLock: icons on g_obstaclesBar the strip must not cover
+HWND g_obstaclesBar;            // guarded by g_wbLock
 
 IUIAutomationCondition* StringCondition(IUIAutomation* uia, PROPERTYID prop, const wchar_t* value) {
     VARIANT v;
@@ -140,13 +159,74 @@ bool IsXamlTaskbar(HWND bar) {
     return FindWindowExW(bar, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr) != nullptr;
 }
 
+// Everything on the main taskbar the strip must not cover: Windows' own buttons (Start, Search, task
+// buttons, tray icons, clock, Show Desktop) and windows other apps put on the taskbar (their own
+// widgets). Explorer's container windows and ours are skipped. Screen rectangles.
+std::vector<RECT> MeasureObstacles(IUIAutomation* uia, HWND bar) {
+    std::vector<RECT> out;
+    RECT br{};
+    IUIAutomationElement* root = nullptr;
+    if (!GetWindowRect(bar, &br) || FAILED(uia->ElementFromHandle(bar, &root)) || !root) return out;
+    bool vertical = br.bottom - br.top > br.right - br.left;
+    DWORD shellPid = 0;
+    GetWindowThreadProcessId(bar, &shellPid);
+    // Windows 10: task buttons live in ReBarWindow32, which Reposition() narrows instead.
+    RECT rebar{};
+    HWND rb = IsXamlTaskbar(bar) ? nullptr : FindWindowExW(bar, nullptr, L"ReBarWindow32", nullptr);
+    if (rb) GetWindowRect(rb, &rebar);
+    VARIANT v;
+    VariantInit(&v);
+    v.vt = VT_I4;
+    IUIAutomationCondition *button = nullptr, *pane = nullptr, *either = nullptr;
+    v.lVal = UIA_ButtonControlTypeId;
+    uia->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &button);
+    v.lVal = UIA_PaneControlTypeId;
+    uia->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &pane);
+    IUIAutomationElementArray* all = nullptr;
+    int n = 0;
+    if (button && pane && SUCCEEDED(uia->CreateOrCondition(button, pane, &either)) && either &&
+        SUCCEEDED(root->FindAll(TreeScope_Descendants, either, &all)) && all && SUCCEEDED(all->get_Length(&n)))
+        for (int i = 0; i < n; i++) {
+            IUIAutomationElement* el = nullptr;
+            RECT r{};
+            CONTROLTYPEID type = 0;
+            BOOL offscreen = FALSE;
+            if (SUCCEEDED(all->GetElement(i, &el)) && el && SUCCEEDED(el->get_CurrentBoundingRectangle(&r)) &&
+                SUCCEEDED(el->get_CurrentControlType(&type)) && SUCCEEDED(el->get_CurrentIsOffscreen(&offscreen)) &&
+                !offscreen && r.right > r.left && r.bottom > r.top &&
+                (vertical ? (r.bottom - r.top) * 2 < br.bottom - br.top
+                          : (r.right - r.left) * 2 < br.right - br.left)) {  // never a container spanning the bar
+                bool take = false;
+                if (type == UIA_ButtonControlTypeId) {
+                    RECT in{};
+                    take = !(rb && IntersectRect(&in, &r, &rebar) && EqualRect(&in, &r));
+                } else {
+                    UIA_HWND hw = nullptr;
+                    DWORD pid = 0;
+                    if (SUCCEEDED(el->get_CurrentNativeWindowHandle(&hw)) && hw && IsWindowVisible((HWND)hw))
+                        GetWindowThreadProcessId((HWND)hw, &pid);
+                    take = pid && pid != shellPid && pid != GetCurrentProcessId();  // another app's window
+                }
+                if (take) out.push_back(r);
+            }
+            if (el) el->Release();
+        }
+    if (all) all->Release();
+    if (either) either->Release();
+    if (pane) pane->Release();
+    if (button) button->Release();
+    root->Release();
+    return out;
+}
+
 DWORD WINAPI WidgetsButtonThread(LPVOID) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IUIAutomation* uia = nullptr;
     IUIAutomationElement* btn = nullptr;
     HWND btnBar = nullptr;
     for (;;) {
-        WaitForSingleObject(g_wbWake, btnBar ? 5000 : INFINITE);  // no widget (tray-icon mode): sleep until one
+        // Every 2 s, so the strip steps aside soon after a new task button or tray icon appears under it.
+        WaitForSingleObject(g_wbWake, btnBar ? 2000 : INFINITE);  // no widget (tray-icon mode): sleep until one
         AcquireSRWLockShared(&g_wbLock);
         HWND bar = g_wbTaskbar;
         ReleaseSRWLockShared(&g_wbLock);
@@ -184,10 +264,14 @@ DWORD WINAPI WidgetsButtonThread(LPVOID) {
             for (HWND t = FindWindowExW(nullptr, nullptr, L"Shell_SecondaryTrayWnd", nullptr); t;
                  t = FindWindowExW(nullptr, t, L"Shell_SecondaryTrayWnd", nullptr))
                 if (IsXamlTaskbar(t)) spans.push_back(MeasureSpan(uia, t));  // Windows 10 bars have real child windows
+        std::vector<RECT> obstacles;
+        if (bar && uia && IsWindow(bar)) obstacles = MeasureObstacles(uia, bar);
         AcquireSRWLockExclusive(&g_wbLock);
         if (bar && g_wbTaskbar == bar) {  // drop a result for a taskbar we no longer sit on
             g_wbRect = r;
             g_wbRectBar = bar;
+            g_obstacles = std::move(obstacles);
+            g_obstaclesBar = bar;
         }
         g_spans = std::move(spans);
         ReleaseSRWLockExclusive(&g_wbLock);
@@ -215,6 +299,23 @@ RECT WidgetsButtonRect() {
     RECT r = g_wbRectBar && g_wbRectBar == g_wbTaskbar ? g_wbRect : RECT{};
     ReleaseSRWLockShared(&g_wbLock);
     return r;
+}
+
+// Taskbar client x (y on a vertical taskbar) of the primary strip's tray-side end with no TaskbarOffset.
+int g_anchor;
+
+// The start nearest to `want` (taskbar client x, or y when `vertical`) where a strip of `len` covers no
+// icon on the main taskbar. Never blocks: uses what the lookup thread last found.
+int Dodge(int want, int len, int maxPos, bool vertical) {
+    AcquireSRWLockShared(&g_wbLock);
+    std::vector<RECT> rects = g_obstaclesBar == g_taskbar ? g_obstacles : std::vector<RECT>{};
+    ReleaseSRWLockShared(&g_wbLock);
+    std::vector<Span1D> taken;
+    for (RECT r : rects) {
+        MapWindowPoints(nullptr, g_taskbar, (POINT*)&r, 2);
+        taken.push_back(vertical ? Span1D{ r.top, r.bottom } : Span1D{ r.left, r.right });
+    }
+    return FreeSpot(want, len, 0, maxPos, taken, 0);
 }
 
 void ApplyTipTheme() {
@@ -609,13 +710,13 @@ void PositionMirror(Mirror& m) {
             }
         ReleaseSRWLockShared(&g_wbLock);
     }
-    DWORD offset = 0, sz = sizeof(offset);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset", RRF_RT_REG_DWORD, nullptr, &offset, &sz) ==
-        ERROR_SUCCESS)
-        right -= Px((int)offset);
     int left = right - m.size.cx - Px(2);
+    if (!known || m.size.cx <= 0 || left < minLeft) { g_dpiBar = nullptr; HideMirror(m); return; }
+    POINT a{ left + m.size.cx, bar.top };  // where its right end sits when not dragged
+    ScreenToClient(m.bar, &a);
+    m.anchor = a.x;
+    left = std::max(left - OffsetPx(), minLeft);  // dragged: never over the task buttons
     g_dpiBar = nullptr;
-    if (!known || m.size.cx <= 0 || left < minLeft) { HideMirror(m); return; }
     POINT p{ left, bar.top };
     ScreenToClient(m.bar, &p);
     bool covered = GetWindow(m.wnd, GW_HWNDPREV) != nullptr;
@@ -770,18 +871,96 @@ void SetHover(HWND h, bool on) {
         }
 }
 
+// The cursor's position, or the strip's anchored end (the one facing the tray / clock, which stays put
+// when the strip changes width), along its taskbar in the taskbar's client coordinates: x, or y for the
+// primary strip on a vertical taskbar. Client coordinates keep right-to-left taskbars right.
+int AxisPos(HWND h, bool cursor) {
+    HWND bar = GetParent(h);
+    POINT p{};
+    if (cursor) {
+        GetCursorPos(&p);
+        ScreenToClient(bar, &p);
+    } else {
+        RECT r{};
+        GetWindowRect(h, &r);
+        MapWindowPoints(nullptr, bar, (POINT*)&r, 2);
+        p = { r.right, r.bottom };
+    }
+    return h == g_wnd && g_vertical ? p.y : p.x;
+}
+
+// Where strip `h` sits with no TaskbarOffset (its tray-side end, same axis as AxisPos).
+int AnchorOf(HWND h) {
+    if (h == g_wnd) return g_anchor;
+    for (const auto& m : g_mirrors)
+        if (m.wnd == h) return m.anchor;
+    return 0;
+}
+
+// The drag is absolute: the strip's end follows the cursor at the distance it was grabbed at, and the
+// offset is measured from the anchor. Whatever moved the strip before (stepping aside from icons, the
+// screen edge, a stale offset) cannot make the drag lose track.
+void BeginDrag(HWND h) {
+    SetCapture(h);
+    g_pressed = true;
+    g_dragging = false;
+    g_dragStart = AxisPos(h, true);
+    g_dragGrab = AxisPos(h, false) - g_dragStart;
+    if (g_wbWake) SetEvent(g_wbWake);  // fresh icon positions for the snap on release
+}
+
+void DragTo(HWND h) {
+    int cur = AxisPos(h, true);
+    if (!g_dragging && abs(cur - g_dragStart) < GetSystemMetrics(g_vertical && h == g_wnd ? SM_CYDRAG : SM_CXDRAG))
+        return;
+    g_dragging = true;
+    g_dragOffset = std::max(0, AnchorOf(h) - (cur + g_dragGrab));  // left (up) of the anchor = positive
+    widget::Reposition();  // places the primary strip and every mirror
+}
+
+void EndDrag(HWND h) {
+    g_pressed = false;
+    if (!g_dragging) return;
+    // Keep the spot it really ended at: snapped into a free gap when dropped on icons (primary strip),
+    // stopped at a screen edge or at the task buttons.
+    widget::Reposition();
+    if (IsWindowVisible(h)) g_dragOffset = std::max(0, AnchorOf(h) - AxisPos(h, false));
+    UINT dpi = GetDpiForWindow(GetParent(h));
+    DWORD v = (DWORD)MulDiv(g_dragOffset, 96, dpi ? (int)dpi : 96);
+    RegSetKeyValueW(HKEY_CURRENT_USER, kRegKey, L"TaskbarOffset", REG_DWORD, &v, sizeof(v));
+    g_dragging = false;
+    if (g_rebar && IsWindow(g_rebar)) {  // Windows 10: let the task buttons take back the space it left
+        RECT r;
+        GetClientRect(g_taskbar, &r);
+        PostMessageW(g_taskbar, WM_SIZE, SIZE_RESTORED, MAKELPARAM(r.right, r.bottom));
+    }
+    widget::Reposition();
+}
+
 LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_MOUSEMOVE: {
             TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
             TrackMouseEvent(&t);
             SetHover(h, true);
+            if (g_pressed && GetCapture() == h) DragTo(h);
             return 0;
         }
         case WM_MOUSELEAVE:
             SetHover(h, false);
             return 0;
-        case WM_LBUTTONUP:
+        case WM_LBUTTONDOWN:
+            BeginDrag(h);
+            return 0;
+        case WM_CAPTURECHANGED:
+            if (g_pressed) EndDrag(h);
+            return 0;
+        case WM_LBUTTONUP: {
+            bool dragged = g_dragging;
+            if (GetCapture() == h) ReleaseCapture();  // ends the drag via WM_CAPTURECHANGED
+            if (!dragged) PostMessageW(g_notify, g_clickMsg, 0, 0);
+            return 0;
+        }
         case WM_RBUTTONUP:
             PostMessageW(g_notify, g_clickMsg, 0, 0);
             return 0;
@@ -940,12 +1119,10 @@ bool Reposition() {
         GetClientRect(g_taskbar, &client);
         POINT anchor{ bar.left, tr.top };
         ScreenToClient(g_taskbar, &anchor);
-        int top = anchor.y - g_size.cy - Px(2);
-        DWORD offset = 0, osz = sizeof(offset);
-        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset", RRF_RT_REG_DWORD, nullptr, &offset,
-                         &osz) == ERROR_SUCCESS)
-            top -= Px((int)offset);
+        g_anchor = anchor.y - Px(2);
+        int top = g_anchor - g_size.cy - OffsetPx();
         top = std::clamp(top, 0, (int)std::max<LONG>(0, client.bottom - g_size.cy));
+        if (!(g_pressed && g_dragging)) top = Dodge(top, g_size.cy, client.bottom, true);  // dragging: follow the mouse
         int left = (int)std::max<LONG>(0, (client.right - g_size.cx) / 2);
         // Windows 10: shorten the task-button area when it would reach behind the column.
         if (g_rebar && IsWindow(g_rebar)) {
@@ -990,15 +1167,13 @@ bool Reposition() {
         edge = rtl ? wb.right : wb.left;
     POINT p{ edge, bar.top };
     ScreenToClient(g_taskbar, &p);
-    int left = p.x - g_size.cx - Px(2);
-
-
-    // Optional user override in DPI-independent pixels (e.g. for custom padding).
-    DWORD customOffset = 0, sz = sizeof(customOffset);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset",
-                     RRF_RT_REG_DWORD, nullptr, &customOffset, &sz) == ERROR_SUCCESS) {
-        left -= Px((int)customOffset);
-    }
+    g_anchor = (int)p.x - Px(2);
+    int left = std::max(0, g_anchor - (int)g_size.cx - OffsetPx());  // OffsetPx: dragged by the user
+    // Step aside from icons that are, or later come, under the strip; it returns to its spot once that
+    // is free again. While dragging it follows the mouse.
+    RECT client{};
+    GetClientRect(g_taskbar, &client);
+    if (!(g_pressed && g_dragging)) left = Dodge(left, g_size.cx, client.right, false);
 
     // Windows 10: Explorer re-expands the task buttons on its own layout passes; narrow them again.
     if (g_rebar && IsWindow(g_rebar)) {
