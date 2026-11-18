@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdio>
 #include <map>
+#include <thread>
 
 namespace {
 std::map<std::wstring, std::map<BYTE, std::vector<BYTE>>> reports;
@@ -67,11 +68,17 @@ int HidDev::Read(std::vector<BYTE>& out, int timeoutMs) {
     if (sent.empty()) return -1;
     auto& scripted = reports[c_.path];
     auto reply = scripted.find(sent.back()[1]);
-    if (reply == scripted.end()) return -1;
+    if (reply == scripted.end()) {
+        // Behave like a real timeout: the driver tells an instant failure (unplugged) from silence.
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeoutMs));
+        return -1;
+    }
     out = reply->second;
     scripted.erase(reply);
     return (int)out.size();
 }
+// Not a generic "2.4G Wireless Receiver" name, so no MCHOSE model probe.
+std::wstring HidProduct(const HidColl&) { return L"AULA 2.4G receiver"; }
 std::wstring Hex4(USHORT v) {
     wchar_t text[8];
     swprintf(text, 8, L"%04X", v);
@@ -115,7 +122,8 @@ int main() {
     assert(ctx.out[0].kind == DeviceKind::Keyboard && ctx.out[1].kind == DeviceKind::Keyboard);
     assert(ctx.IsClaimed(0x3554, 0xFA09));
 
-    // Silence triggers three battery attempts, then skips the path on the next poll.
+    // Silence resends the battery request every ~1.3 s within the 4 s deadline, then skips the path
+    // on the next poll.
     auto silent = Collection(L"eeee");
     ctx = {};
     ctx.colls = { silent };
@@ -123,13 +131,14 @@ int main() {
     PollAula(ctx);
     assert(ctx.out.empty() && ctx.claimed.empty());
     assert(opens[silent.path] == 1);
-    assert(RequestCount(silent, 0x07) == 1 && RequestCount(silent, 0x4A) == 3);
+    const int attempts = RequestCount(silent, 0x4A);
+    assert(RequestCount(silent, 0x07) == 1 && attempts >= 3 && attempts <= 4);
     ctx = {};
     ctx.colls = { silent };
     PollAula(ctx);
     assert(ctx.out.empty() && ctx.claimed.empty());
     assert(opens[silent.path] == 1);
-    assert(RequestCount(silent, 0x07) == 1 && RequestCount(silent, 0x4A) == 3);
+    assert(RequestCount(silent, 0x07) == 1 && RequestCount(silent, 0x4A) == attempts);
 
     // Older firmware can ignore link status while still reporting a valid battery level.
     auto legacy = Collection(L"ffff");

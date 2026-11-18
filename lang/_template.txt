@@ -1,0 +1,115 @@
+# Wireless Battery UI phrases. To add a language:
+#  1. Copy this file to xx.txt (xx = language code, e.g. "it" or "pt-BR") in the lang folder.
+#  2. Fill in @code and @name (the language in its own words); add "@rtl = 1" for right-to-left scripts.
+#  3. Write the translation after " = " on each line. Lines left empty stay English.
+#  Keep {placeholders} exactly as they are; the app fills them in. "\n" is a line break.
+#  The file is plain UTF-8 text. Share it as a pull request so everyone gets it.
+@code = 
+@name = 
+
+# Menus, status and notifications
+off / not connected = 
+{percent}% (last known) = 
+unknown = 
+charging = 
+asleep = 
+No devices with battery info found = 
+Low battery = 
+{name} is at {percent}% = 
+Point at a device to show, hide or move it = 
+Show on the taskbar = 
+Show in the tray = 
+Move left = 
+Move up = 
+Move right = 
+Move down = 
+Hide last known / asleep devices = 
+Show on the taskbar (icon + percentage) = 
+Show as tray icons = 
+Background behind taskbar text (for transparent taskbars) = 
+Icons above percentages (narrower) = 
+All monitors = 
+Main monitor only = 
+{monitor} only = 
+Chosen monitor (not connected, shown on main) = 
+Show the widget on = 
+Brand colors (Razer green, Logitech blue, ...) = 
+Automatic (Windows language) = 
+Add your own language... = 
+Language = 
+Refresh now = 
+Start with Windows = 
+Request support for a device... = 
+Support the project... = 
+Exit = 
+Thank you! Your request was sent. You can follow it at {page}. = 
+You already sent this device in the last 24 hours, so it's on the list. Thank you! = 
+The request was not accepted: {reason} = 
+please check the fields. = 
+Too many requests from your network. Please try again in an hour. = 
+Couldn't reach krisgfx.com. Check your connection, or use "Copy full report" and post it on GitHub. = 
+The site answered with an error ({code}). Please try again later. = 
+Device = 
+(type the device name) = 
+Type = 
+Your name = 
+(not sent) = 
+(kept private) = 
+Notes = 
+My device is not in this list = 
+Pick the device that isn't shown. Devices with a vendor-specific interface are listed first. = 
+Is one of your devices not shown? Pick it below and send it to us. It goes on the public request list at krisgfx.com/tools, and we'll look into supporting it. = 
+Scanning devices... = 
+Device name (as it's sold) = 
+Your name (optional, kept private and never shown) = 
+Anything else we should know? (optional) = 
+This is exactly what will be sent: = 
+Scanning your devices... = 
+Copy full report = 
+Send = 
+Close = 
+The full report is copied. Paste it into a GitHub issue if we ask for more details. = 
+Sending... = 
+Collecting the full report (this takes about 10 seconds)... = 
+request support for a device = 
+Other monitor = 
+Display {number} = 
+
+# Where another monitor sits, next to the main one ("Display 3 (left)")
+left = 
+right = 
+above = 
+below = 
+
+# Coarse battery levels (devices that only report a few steps)
+Full = 
+Good = 
+Medium = 
+Low = 
+Critical = 
+Empty = 
+
+# Device types (request window)
+mouse = 
+keyboard = 
+headset = 
+controller = 
+other = 
+
+# How a device is connected
+2.4 GHz dongle = 
+2.4 GHz dongle or USB = 
+2.4 GHz receiver = 
+2.4 GHz receiver / USB = 
+2.4 GHz receiver or USB = 
+Base station = 
+BT600 adapter = 
+Corsair receiver = 
+Jabra Link dongle = 
+Logitech receiver = 
+Razer receiver = 
+USB / Bluetooth = 
+USB base station = 
+USB cable = 
+UWB base station = 
+Wireless adapter = 

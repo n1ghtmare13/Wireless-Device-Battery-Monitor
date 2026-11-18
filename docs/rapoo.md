@@ -56,6 +56,25 @@ After the owner disconnected the cable and reconnected the receiver, the final e
 `52%` over `2.4 GHz receiver`, without the charging flag, and retained the same `rapoo:4617` key.
 This also verifies the cable-to-receiver transition against live hardware.
 
+Also tested on Windows with a **VT9 Gen 2** on 2026-11-17:
+
+| Connection | VID:PID | Interface | Usage page:usage | Input / output size |
+|---|---|---|---|---|
+| 2.4 GHz receiver | `24AE:1414` | 1 | `FF00:0002` | 16 / 16 bytes |
+| USB cable | `24AE:4614` | 1 | `FF00:0002` | 19 / 19 bytes |
+
+The VT9 Gen 2 receiver exposes a **16-byte** `FF00:0002` report rather than 19 bytes, using the exact
+same Nordic 54L `07` layout (including the embedded `4614` PID at bytes 13–14). Captured frames:
+
+```text
+07 10 03 40 06 40 06 01 64 00 03 01 00 14 46 01             # receiver: 100%, discharging
+07 12 04 80 0C 80 0C 02 64 00 03 01 00 14 46 01 02 02 00    # USB cable (switch ON): 100%, charging
+```
+
+Over USB cable, status reports were observed on interaction (e.g., DPI change); with the bottom
+power switch turned OFF while plugged in, the mouse reported `state=2, percent=1` instead of the
+actual battery percentage.
+
 ## Other Rapoo mice
 
 The official Rapoo Hub uses this `07` layout for its Nordic 54L mouse driver. Its manifests
@@ -82,7 +101,20 @@ For this legacy format, states 1/2 mean discharging/charging. A charging percent
 unknown and is preserved as unknown. Transition state 0, unrelated `BC` reports, malformed packets,
 and percentages above 100 are ignored. Legacy support has automated coverage, but has not been
 verified with a physical legacy mouse here. This interpretation is restricted to product IDs
-`1215/4415` and their 7-byte input collection. The Nordic profile never interprets `BB` packets.
+`1215/4415` (VT3 Pro), `1233/4433` (VT1 Pro Max) and their 7-byte input collection.
+
+The VT1 Pro Max (receiver `24AE:1233`, cable `24AE:4433`, mouse firmware 222, dongle firmware 213)
+was added from USBPcap captures its owner attached to issue #136. The `--dump` output lists the
+7-byte `FF00:0002` collection on interface 1, and the captures show it pushing, with no request
+from the Rapoo app:
+
+```text
+BB B0 71 84 03 01 64   receiver, every ~3.2 s; Rapoo app showed 100%
+BB B0 71 84 03 02 5F   cable, charging, 95%; Rapoo app showed "Charging"
+```
+
+On the cable the report was seen only once in a 16-second capture, so a cable-only reading may
+time out on some refreshes; the receiver pushes it regularly. The Nordic profile never interprets `BB` packets.
 
 This does **not** establish support for every Rapoo device. CH584 models such as VT1 SE and VT7 SE
 use report `08` in the official driver and are not supported by this decoder. Other Telink revisions use a different
@@ -92,9 +124,11 @@ separate verified implementation. Do not send guessed queries to them.
 
 ## Polling and identity
 
-- Reading is passive. The deadline is 4 seconds per matching collection, allowing a documented
-  legacy push interval of roughly 3.2 seconds. Unrelated packets do not restart that deadline.
-- No queued status is flushed. Each refresh opens a fresh handle and closes it after reading.
+- Reading is passive. Matching `FF00:0002` handles stay open between polls (matching `PollXenta`)
+  so Windows buffers status frames arriving during the 60-second refresh interval; each poll drains
+  any queued frames (keeping the newest valid battery reading) before falling back to a 5-second
+  wait on first open or an empty queue. Unplugged devices are removed and their handles closed.
+  Unrelated packets do not restart the deadline.
 - The embedded mouse PID, or a known cable/receiver pair for legacy devices, gives the same UI key
   across cable changes. Cable and receiver readings are merged into one entry, preferring the cable's
   state while preserving a valid receiver percentage if the cable reports an unknown level.
@@ -124,6 +158,7 @@ the Makefile discovers it automatically. MinGW itself was not installed in the t
   Minified names may change on future releases.
 - [Device-Battery-Info: RapooProtocol.cs](https://github.com/PyFlat/Device-Battery-Info/blob/4553297903ecfb20e55116014b8ec437deaf640d/src/DeviceBatteryInfo/Sources/Rapoo/RapooProtocol.cs),
   for legacy VT3 Pro reports, charging state and the unknown-level sentinel.
+- Issue #136 USBPcap captures (VT1 Pro Max on receiver and on cable while charging).
 - [ClickSync: protocol_api_rapoo.js](https://github.com/Nuitfanee/ClickSync/blob/3a945428b25bf6b2db0e8750f819666caff9cda5/src/protocols/protocol_api_rapoo.js)
   independently corroborates passive `07` status broadcasts and the battery offset. Its parser
   clamps invalid percentages; this implementation rejects them instead.

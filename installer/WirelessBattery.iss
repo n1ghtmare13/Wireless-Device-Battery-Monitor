@@ -46,6 +46,7 @@ Name: "{autoprograms}\Wireless Battery"; Filename: "{app}\WirelessBattery.exe"
 
 [Run]
 Filename: "{app}\WirelessBattery.exe"; Description: "Start Wireless Battery now"; Flags: nowait postinstall skipifsilent
+Filename: "https://ko-fi.com/krisgfx"; Description: "Enjoying Wireless Battery? Support it on Ko-fi"; Flags: shellexec postinstall unchecked skipifsilent nowait runasoriginaluser
 
 [UninstallRun]
 Filename: "{app}\WirelessBattery.exe"; Parameters: "--quit"; Flags: runhidden waituntilterminated; RunOnceId: "QuitApp"

@@ -6,8 +6,12 @@
 //    Property 0F = battery (0..1000), 10 = charge state (1 charging, 3 full), 12 = product id (as in OpenRGB). Target 08 is the device
 //    or receiver itself, 09+ are devices paired to a receiver. GET is read-only; we never switch the
 //    device into software mode.
+//  * Compx mice (e.g. Corsair Sabre V2 Pro Ultralight Wireless, 1B1C:2B2A):
+//    17-byte report ID 08, command 03 = online status, command 04 = battery.
+//    Byte 6 = percent, byte 7 = charging, bytes 8-9 = millivolts, byte 16 = checksum.
+//    Uses HID collection FF02:0002. Protocol reference: HeyOkay/HaloBattery
+//    protocol documentation; shared framing also used by the existing Kysona driver.
 #include "drivers.h"
-
 #include <algorithm>
 
 namespace {
@@ -16,8 +20,17 @@ const USHORT kVoidPids[] = { 0x1B1C, 0x1B27, 0x0A14, 0x0A16, 0x0A17, 0x0A1D, 0x0
                              0x1B29, 0x0A55, 0x0A51, 0x0A52, 0x0A38, 0x0A4F, 0x0A2B, 0x0A75, 0x0A56 };
 const USHORT kBragiPids[] = { 0x2A08, 0x2A02, 0x0A97, 0x0A64, 0x0A62, 0x0A3E, 0x0A3D, 0x2B00 };
 
-bool Contains(const USHORT* b, size_t n, USHORT v) { return std::find(b, b + n, v) != b + n; }
+// Corsair mice using the Compx battery protocol.
+struct CorsairCompxModel { USHORT pid; const wchar_t* name; };
+const CorsairCompxModel kCorsairCompxModels[] = {
+    { 0x2B2A, L"Corsair Sabre V2 Pro Ultralight" },
+};
+const CorsairCompxModel* FindCorsairCompxModel(USHORT pid) {
+    for (const auto& m : kCorsairCompxModels) if (m.pid == pid) return &m;
+    return nullptr;
+}
 
+bool Contains(const USHORT* b, size_t n, USHORT v) { return std::find(b, b + n, v) != b + n; }
 bool PollVoid(const HidColl& c, DeviceStatus& s) {
     HidDev d;
     if (!d.Open(c)) return false;
@@ -36,7 +49,6 @@ bool PollVoid(const HidColl& c, DeviceStatus& s) {
     if (st == 1 || st == 2 || s.charging) s.percent = Clamp100(r[2] & 0x7F);
     return true;
 }
-
 class Bragi {
 public:
     explicit Bragi(const HidColl& c) : numbered_(c.outLen() == 64) { ok_ = d_.Open(c); }
@@ -52,7 +64,6 @@ public:
         if (GetFramed(true, target, prop, value, timeoutMs)) { mode_ = Plain; return true; }
         return false;
     }
-
 private:
     bool GetFramed(bool plain, BYTE target, BYTE prop, unsigned& value, int timeoutMs) {
         std::vector<BYTE> req;
@@ -70,7 +81,6 @@ private:
         value = r[o + 3] | (r[o + 4] << 8) | (r[o + 5] << 16) | ((unsigned)r[o + 6] << 24);
         return true;
     }
-
     enum Mode { Unknown, Prefixed, Plain };
     HidDev d_;
     bool numbered_;
@@ -78,14 +88,83 @@ private:
     Mode mode_ = Unknown;
 };
 
-}  // namespace
+// Devices seen behind a receiver, identified by the product ID they report (property 12).
+struct PairedModel { USHORT pid; const wchar_t* name; DeviceKind kind; };
+const PairedModel kPairedModels[] = {
+    { 0x1B7E, L"Corsair Dark Core RGB Pro SE", DeviceKind::Mouse },  // tested on Slipstream receiver 1BDC
+};
+const PairedModel* FindPaired(unsigned pid) {
+    for (const auto& m : kPairedModels) if (m.pid == pid) return &m;
+    return nullptr;
+}
 
+// Corsair Compx battery protocol (17-byte reports).
+BYTE CorsairCompxChecksum(const BYTE* b) {
+    unsigned sum = 0;
+    for (int i = 0; i < 16; i++) sum += b[i];
+    return (BYTE)(0x55 - sum);
+}
+bool CorsairCompxQuery(HidDev& d, BYTE cmd, std::vector<BYTE>& r) {
+    std::vector<BYTE> req(17, 0);
+    req[0] = 0x08;
+    req[1] = cmd;
+    req[16] = CorsairCompxChecksum(req.data());
+    d.Flush();
+    if (!d.Write(req)) return false;
+    ULONGLONG end = GetTickCount64() + 500;
+    for (;;) {
+        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
+        if (left <= 0 || d.Read(r, left) < 17) return false;
+        if (r[0] == 0x08 && r[1] == cmd && r[16] == CorsairCompxChecksum(r.data()))
+            return true;
+    }
+}
+bool PollCorsairCompx(PollContext& ctx, const HidColl& c, USHORT vid, USHORT pid, const CorsairCompxModel& model) {
+    HidDev d;
+    if (!d.Open(c)) return false;
+    DeviceStatus s;
+    std::vector<BYTE> r;
+    bool answered = false;
+    // Check whether the mouse is connected to the receiver.
+    if (CorsairCompxQuery(d, 0x03, r)) { answered = true; s.connected = r[6] != 0; }
+    // If command 03 is unsupported, try the battery query directly.
+    if ((!answered || s.connected) && CorsairCompxQuery(d, 0x04, r)) {
+        answered = true;
+        s.connected = true;
+        if (r[6] <= 100) s.percent = r[6];
+        s.charging = r[7] != 0;
+        s.millivolts = (r[8] << 8) | r[9];
+    } else if (answered && s.connected) {
+        // The receiver reports the mouse online, but the battery query failed.
+        s.asleep = true;
+    }
+    if (!answered) return false;
+    if (!s.connected) { ctx.Claim(vid, pid); return true; }
+    s.key = L"corsair:" + Hex4(pid);
+    s.name = model.name;
+    s.kind = DeviceKind::Mouse;
+    s.via = L"2.4 GHz receiver";
+    s.graceSec = 1800;
+    ctx.Add(s, vid, pid);
+    return true;
+}
+
+}  // namespace
 void PollCorsair(PollContext& ctx) {
     for (auto [vid, pid] : ctx.Products(0x1B1C)) {
         if (Contains(kVoidPids, std::size(kVoidPids), pid)) {
             for (const HidColl* c : ctx.Find(vid, pid, [](const HidColl& c) { return (c.page() == 0xFFC5 || c.page() == 0xFF00) && c.outLen() > 0; })) {
                 DeviceStatus s;
                 if (PollVoid(*c, s)) { ctx.Add(s, vid, pid); break; }
+            }
+            continue;
+        }
+        // Corsair mice using the Compx battery protocol.
+        if (const CorsairCompxModel* model = FindCorsairCompxModel(pid)) {
+            for (const HidColl* c : ctx.Find(vid, pid, [](const HidColl& c) {
+                return c.page() == 0xFF02 && c.usage() == 0x0002 && c.outLen() >= 17 && c.inLen() >= 17;
+            })) {
+                if (PollCorsairCompx(ctx, *c, vid, pid, *model)) break;
             }
             continue;
         }
@@ -113,10 +192,18 @@ void PollCorsair(PollContext& ctx) {
                 // A receiver names itself, not the device behind it, and has mouse collections of its own.
                 // Property 12 is the paired device's product id (read-only); Corsair headsets use 0Axx.
                 unsigned devPid = 0;
-                if (target != 0x08 && b.Get(target, 0x12, devPid) && (devPid >> 8) == 0x0A) {
-                    s.kind = DeviceKind::Headset;
-                    if (product.find(L"Receiver") != std::wstring::npos) s.name = L"Corsair wireless headset";
+                if (target != 0x08 && b.Get(target, 0x12, devPid)) {
+                    if (const PairedModel* m = FindPaired(devPid)) {
+                        s.name = m->name;
+                        s.kind = m->kind;
+                    } else if ((devPid >> 8) == 0x0A) {
+                        s.kind = DeviceKind::Headset;
+                        if (product.find(L"Receiver") != std::wstring::npos) s.name = L"Corsair wireless headset";
+                    }
                 }
+                // Corsair headsets and their receivers use product ids 0Axx (HS80 RGB receiver 0A6B names
+                // itself "... Wireless Gaming Receiver", and its collections look like a keyboard).
+                if (s.kind == DeviceKind::Other && (pid >> 8) == 0x0A) s.kind = DeviceKind::Headset;
                 if (s.kind == DeviceKind::Other) s.kind = KindFromCollections(ctx.colls, vid, pid);
                 s.via = target == 0x08 ? L"USB / Bluetooth" : L"Corsair receiver";
                 s.percent = Clamp100((int)(level + 5) / 10);
