@@ -322,7 +322,8 @@ void PollAjazzAj139(PollContext& ctx) {
             s.via = cable ? L"USB cable" : L"2.4 GHz receiver";
             s.charging = r[9] != 0;
             s.connected = cable || r[8] > 0;  // 0 from the dongle: the mouse is off or out of range
-            if (s.connected) s.percent = r[8];
+            static DischargeLatch latch;  // byte 8 follows battery voltage and swings 94..100 with load
+            if (s.connected) s.percent = latch.Filter(s.key, r[8], s.charging);
             ctx.Add(s, vendor, pid);
             break;
         }

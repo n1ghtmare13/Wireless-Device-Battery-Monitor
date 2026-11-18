@@ -29,6 +29,25 @@ private:
     std::map<std::wstring, ULONGLONG> until_;
 };
 
+// Voltage-based gauges wobble a few percent with load (an AJ139 read 97, 94, 97 within a minute).
+// While discharging, keep showing the lowest reading; charging, or a rise above kRechargeJump (charged
+// while unseen), starts over. Pass percent < 0 when there is no reading.
+class DischargeLatch {
+public:
+    int Filter(const std::wstring& key, int percent, bool charging) {
+        if (charging) { shown_.erase(key); return percent; }
+        if (percent < 0) return percent;
+        auto it = shown_.find(key);
+        if (it == shown_.end()) return shown_[key] = percent;
+        if (percent < it->second || percent > it->second + kRechargeJump) it->second = percent;
+        return it->second;
+    }
+
+private:
+    static constexpr int kRechargeJump = 10;
+    std::map<std::wstring, int> shown_;
+};
+
 struct PollContext
 {
     std::vector<HidColl> colls;

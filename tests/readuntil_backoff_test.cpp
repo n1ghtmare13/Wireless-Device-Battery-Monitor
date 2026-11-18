@@ -64,6 +64,21 @@ int main() {
         assert(reads == 0 && matches == 0 && reports.size() == 1);
     }
 
+    // Load wobble while discharging (AJ139: 97, 94, 97, 100) must not climb back up.
+    DischargeLatch latch;
+    assert(latch.Filter(L"m", 97, false) == 97);
+    assert(latch.Filter(L"m", 94, false) == 94);
+    assert(latch.Filter(L"m", 97, false) == 94);
+    assert(latch.Filter(L"m", 100, false) == 94);
+    assert(latch.Filter(L"other", 60, false) == 60);
+    assert(latch.Filter(L"m", -1, false) == -1);   // asleep: no reading, latch kept
+    assert(latch.Filter(L"m", 96, false) == 94);
+    assert(latch.Filter(L"m", 99, true) == 99);    // charging shows the raw value and resets
+    assert(latch.Filter(L"m", 98, false) == 98);
+    assert(latch.Filter(L"m", 80, false) == 80);
+    assert(latch.Filter(L"m", 95, false) == 95);   // big rise: charged while unseen
+    assert(latch.Filter(L"other", 59, false) == 59);
+
     Backoff backoff(50);
     assert(!backoff.Waiting(L"unknown"));
     backoff.Failed(L"first");
