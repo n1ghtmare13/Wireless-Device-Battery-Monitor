@@ -57,6 +57,10 @@ Please open an issue with:
   restart it for unrelated reports, and document why the exception is needed.
 - **Credit sources:** cite where the protocol comes from in a comment at the top of the file.
 
+## Translations
+
+A language is one UTF-8 text file in `lang/` (copy `lang/_template.txt`, fill in `@code`, `@name` and the phrases). It is built into the app automatically. New UI text in the code goes through `T(L"...")`, or `TF(L"... {name} ...", { { L"name", value } })` when it contains values; never build translated sentences from pieces. After adding phrases, add them to `lang/_template.txt` too.
+
 ## Code style
 
 C++17, Win32 only, no third-party dependencies. Keep the binary small. Format roughly as the

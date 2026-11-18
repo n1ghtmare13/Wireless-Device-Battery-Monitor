@@ -6,14 +6,16 @@
 
 namespace {
 std::vector<std::vector<BYTE>> replies;
+std::vector<std::vector<BYTE>> wiredReplies;
+std::vector<USHORT> queriedPids;
 int opens = 0, sends = 0, reads = 0;
 int readDelayMs = 0;
 bool openOk = true, featureOpenOk = true, sendOk = true;
 
-HidColl Collection(bool input) {
+HidColl Collection(bool input, USHORT pid = 0x1074) {
     HidColl c;
     c.vid = 0x260D;
-    c.pid = 0x1074;
+    c.pid = pid;
     c.iface = 1;
     c.path = input ? L"input" : L"feature";
     c.caps.UsagePage = input ? 0xFF01 : 0xFF02;
@@ -27,13 +29,15 @@ std::vector<BYTE> Reply(BYTE percent = 85, BYTE charging = 0) {
     return { 0x09, 0x04, 0, 0, 0, 2, percent, charging, 0, 0, 0, 0, 0, 0, 0, 0, 0xF1 };
 }
 
-PollContext Context() {
+PollContext Context(USHORT pid = 0x1074) {
     opens = sends = reads = 0;
     readDelayMs = 0;
     openOk = featureOpenOk = sendOk = true;
     replies.clear();
+    wiredReplies.clear();
+    queriedPids.clear();
     PollContext ctx;
-    ctx.colls = { Collection(true), Collection(false) };
+    ctx.colls = { Collection(true, pid), Collection(false, pid) };
     return ctx;
 }
 }  // namespace
@@ -60,16 +64,18 @@ bool HidDev::SetFeature(const std::vector<BYTE>& request) {
     expected[16] = 0x49;
     assert(request == expected);
     ++sends;
+    queriedPids.push_back(c_.pid);
     return sendOk;
 }
 int HidDev::Read(std::vector<BYTE>& out, int timeoutMs) {
-    assert(c_.path == L"input" && sends == 1);
+    assert(c_.path == L"input" && !queriedPids.empty() && queriedPids.back() == c_.pid);
     assert(timeoutMs > 0 && timeoutMs <= 1000);
     ++reads;
     if (readDelayMs) Sleep((DWORD)(timeoutMs < readDelayMs ? timeoutMs : readDelayMs));
-    if (replies.empty()) return -1;
-    out = replies.front();
-    replies.erase(replies.begin());
+    auto& pending = c_.pid == 0x1090 ? wiredReplies : replies;
+    if (pending.empty()) return -1;
+    out = pending.front();
+    pending.erase(pending.begin());
     return (int)out.size();
 }
 std::wstring Hex4(USHORT v) {
@@ -146,7 +152,46 @@ int main() {
     PollDareu(ctx);
     assert(ctx.out.empty() && opens == 2 && sends == 0 && reads == 0);
 
-    for (int invalid = 0; invalid < 10; invalid++) {
+    ctx = Context(0x1090);
+    wiredReplies = { Reply(85, 1) };
+    PollDareu(ctx);
+    assert(ctx.out.size() == 1 && ctx.IsClaimed(0x260D, 0x1090));
+    assert(ctx.out[0].key == L"dareu:260D:1090" && ctx.out[0].via == L"USB cable");
+    assert(ctx.out[0].percent == 85 && ctx.out[0].charging);
+    assert(opens == 2 && sends == 1 && reads == 1);
+    PollDareu(ctx);
+    assert(sends == 1);
+
+    ctx = Context();
+    ctx.colls.push_back(Collection(true, 0x1090));
+    ctx.colls.push_back(Collection(false, 0x1090));
+    wiredReplies = { Reply(85, 1) };
+    replies = { Reply(80) };
+    PollDareu(ctx);
+    assert(ctx.out.size() == 1 && ctx.out[0].via == L"USB cable");
+    assert(ctx.out[0].percent == 85 && sends == 1 && queriedPids[0] == 0x1090);
+    assert(replies.size() == 1);  // do not also query the cached receiver
+
+    ctx = Context();
+    ctx.colls.push_back(Collection(true, 0x1090));
+    ctx.colls.push_back(Collection(false, 0x1090));
+    replies = { Reply(80) };
+    PollDareu(ctx);
+    assert(ctx.out.size() == 1 && ctx.out[0].via == L"2.4 GHz receiver");
+    assert(ctx.out[0].percent == 80 && sends == 2 && opens == 4);
+    assert(queriedPids[0] == 0x1090 && queriedPids[1] == 0x1074);
+
+    ctx = Context(0x1090);
+    wiredReplies = { wrongId, failed, shortReply, Reply(101), Reply(54) };
+    PollDareu(ctx);
+    assert(ctx.out.size() == 1 && ctx.out[0].percent == 54 && !ctx.out[0].charging && reads == 5);
+
+    ctx = Context(0x1090);
+    ctx.colls.push_back(ctx.colls[0]);
+    PollDareu(ctx);
+    assert(ctx.out.empty() && opens == 0 && sends == 0);
+
+    for (int invalid = 0; invalid < 11; invalid++) {
         ctx = Context();
         if (invalid == 0) ctx.colls[0].pid = 0x1090;
         if (invalid == 1) ctx.colls[1].vid = 0x3554;
@@ -158,6 +203,7 @@ int main() {
         if (invalid == 7) ctx.colls.push_back(ctx.colls[0]);
         if (invalid == 8) ctx.colls.push_back(ctx.colls[1]);
         if (invalid == 9) ctx.colls.pop_back();
+        if (invalid == 10) ctx.colls[0].pid = ctx.colls[1].pid = 0x1091;
         PollDareu(ctx);
         assert(ctx.out.empty() && ctx.claimed.empty() && opens == 0 && sends == 0);
     }

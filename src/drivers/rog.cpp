@@ -1,4 +1,4 @@
-// ASUS ROG wireless keyboards, mice and the ROG Pelta headset (VID 0B05), including the ROG Omni Receiver (0B05:1ACE).
+// ASUS ROG wireless keyboards, mice and the ROG Pelta / Delta II headsets (VID 0B05), including the ROG Omni Receiver (0B05:1ACE).
 // Query: [report id][12][sub]   sub 01 = keyboard battery, sub 07 = mouse battery.
 // Reply: [report id][12][sub]...  keyboard: [6] % (Falchion: [11]), [9] == 1 charging
 //                                 mouse:    [5] level (x25 on older 0-4 gauges), [10] charging
@@ -176,16 +176,20 @@ void PollOmni(PollContext& ctx, std::vector<std::wstring>& seen) {
     }
 }
 
-// ROG Pelta headset, 2.4 GHz dongle 0B05:1B84. Vendor collection FF00:0001 on interface 3, report
-// id CC, 64 bytes each way. That collection has no interrupt OUT pipe, so the query goes out as
-// HidD_SetOutputReport with a read already pending.
+// ROG Pelta (0B05:1B84) and ROG Delta II (0B05:1AFA) headsets. Vendor collection FF00:0001 on
+// interface 3, report id CC, 64 bytes each way.
 //   CC 12 07 -> CC 12 07 00 00 [5] sleep min [6] battery % (FE = unknown) [7] low-battery alert %
 //   CC 12 08 -> CC 12 08 00 00 [5] 1 = charging
-// A sleeping or switched-off headset answers with FF AA in [5..6]. Unsolicited event reports
-// (CC 12 0E / 09 ...) are skipped by matching the echoed command byte.
-// Protocol from github.com/jimm0thy/pelta-control (MIT), github.com/B1Chat/BatteryWatch (MIT) and
-// github.com/TheWebDog/quiet-battery/issues/1.
-constexpr USHORT kPeltaPid = 0x1B84;
+// A sleeping or switched-off headset answers with FF AA in [5..6] or [1..2].
+struct HeadsetModel {
+    USHORT pid;
+    const wchar_t* name;
+};
+
+const HeadsetModel kHeadsets[] = {
+    { 0x1B84, L"ROG Pelta" },
+    { 0x1AFA, L"ROG Delta II" },
+};
 
 Reply PeltaQuery(HidDev& d, BYTE cmd, std::vector<BYTE>& reply) {
     d.Flush();
@@ -193,6 +197,10 @@ Reply PeltaQuery(HidDev& d, BYTE cmd, std::vector<BYTE>& reply) {
     ULONGLONG end = GetTickCount64() + 1200;
     std::vector<BYTE> r;
     int n = d.SetOutputAndRead({ 0xCC, 0x12, cmd }, r, 1200);
+    if (n < 0 && d.Write({ 0xCC, 0x12, cmd })) {
+        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
+        if (left > 0) n = d.Read(r, left);
+    }
     while (n >= 8) {
         if (r[0] == 0xCC && r[1] == 0xFF && r[2] == 0xAA) return Reply::Asleep;
         if (r[0] == 0xCC && r[1] == 0x12) {
@@ -207,32 +215,34 @@ Reply PeltaQuery(HidDev& d, BYTE cmd, std::vector<BYTE>& reply) {
 }
 
 void PollPelta(PollContext& ctx) {
-    if (ctx.IsClaimed(0x0B05, kPeltaPid)) return;
-    auto colls = ctx.Find(0x0B05, kPeltaPid, [](const HidColl& c) {
-        return c.iface == 3 && c.page() == 0xFF00 && c.usage() == 0x0001 && c.inLen() >= 8 && c.outLen() >= 8;
-    });
-    for (const HidColl* c : colls) {
-        HidDev d;
-        std::vector<BYTE> r;
-        if (!d.Open(*c)) continue;
-        Reply res = PeltaQuery(d, 0x07, r);
-        if (res == Reply::None) continue;
-        DeviceStatus s;
-        s.key = L"rog:" + Hex4(kPeltaPid) + L":hs";
-        s.name = L"ROG Pelta";
-        s.kind = DeviceKind::Headset;
-        s.via = L"2.4 GHz receiver";
-        if (res == Reply::Asleep) {
-            s.asleep = true;
-        } else {
-            if (r[6] <= 100) s.percent = r[6];
-            else s.asleep = true;  // FE = level not known yet
-            std::vector<BYTE> ch;
-            if (PeltaQuery(d, 0x08, ch) == Reply::Ok) s.charging = ch[5] == 1;
+    for (const HeadsetModel& hs : kHeadsets) {
+        if (ctx.IsClaimed(0x0B05, hs.pid)) continue;
+        auto colls = ctx.Find(0x0B05, hs.pid, [](const HidColl& c) {
+            return c.iface == 3 && c.page() == 0xFF00 && c.usage() == 0x0001 && c.inLen() >= 8 && c.outLen() >= 8;
+        });
+        for (const HidColl* c : colls) {
+            HidDev d;
+            std::vector<BYTE> r;
+            if (!d.Open(*c)) continue;
+            Reply res = PeltaQuery(d, 0x07, r);
+            if (res == Reply::None) continue;
+            DeviceStatus s;
+            s.key = L"rog:" + Hex4(hs.pid) + L":hs";
+            s.name = hs.name;
+            s.kind = DeviceKind::Headset;
+            s.via = L"2.4 GHz receiver";
+            if (res == Reply::Asleep) {
+                s.asleep = true;
+            } else {
+                if (r[6] <= 100) s.percent = r[6];
+                else s.asleep = true;  // FE = level not known yet
+                std::vector<BYTE> ch;
+                if (PeltaQuery(d, 0x08, ch) == Reply::Ok) s.charging = ch[5] == 1;
+            }
+            ctx.out.push_back(s);
+            ctx.Claim(0x0B05, hs.pid);
+            break;
         }
-        ctx.out.push_back(s);
-        ctx.Claim(0x0B05, kPeltaPid);
-        return;
     }
 }
 

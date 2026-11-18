@@ -5,11 +5,18 @@
 //    optional mouse PID at 13..14. Connection is the low nibble of byte 1 (0 RF / 1 BT / 2 USB).
 //  * https://github.com/PyFlat/Device-Battery-Info (RapooProtocol.cs): older 7-byte BB B0
 //    reports on FF00:0002, state at byte 5, percent at byte 6; charging can report 7F (unknown).
-// Legacy BB semantics are restricted to VT3 Pro 1215/4415; other Telink firmware differs.
+//  * VT1 Pro Max (receiver 1233, cable 4433): USBPcap captures from the owner in issue #136
+//    show the same passive 7-byte report on interface 1 / FF00:0002, sent without any request:
+//    receiver `BB B0 71 84 03 01 64` every ~3.2 s (Rapoo app: 100%), cable while charging
+//    `BB B0 71 84 03 02 5F` (state 2 = charging, 95%).
+// Legacy BB semantics are restricted to the product IDs above; other Telink firmware differs.
 #include "drivers.h"
 #include "rapoo_protocol.h"
 
 #include <algorithm>
+#include <map>
+#include <memory>
+#include <set>
 
 namespace {
 
@@ -33,9 +40,10 @@ const Model kModels[] = {
     { 0x4621, 0x1421, L"Rapoo VT3S Max" },
     { 0x4613, 0x1413, L"Rapoo VT7" },
     { 0x4616, 0x1416, L"Rapoo VT7 Max" },
-    { 0x4614, 0x1414, L"Rapoo VT9" },
+    { 0x4614, 0x1414, L"Rapoo VT9 (Gen 2)" },
     { 0x4618, 0x1418, L"Rapoo VT9 Max" },
     { 0x4415, 0x1215, L"Rapoo VT3 Pro" },
+    { 0x4433, 0x1233, L"Rapoo VT1 Pro Max" },
 };
 
 const Model* FindModel(USHORT pid) {
@@ -44,32 +52,76 @@ const Model* FindModel(USHORT pid) {
     return nullptr;
 }
 
-bool IsLegacyVT3Pro(USHORT pid) { return pid == 0x1215 || pid == 0x4415; }
+// Mice confirmed to send the 7-byte BB B0 status report.
+bool IsLegacyVT3Pro(USHORT pid) {
+    return pid == 0x1215 || pid == 0x4415 ||  // VT3 Pro
+           pid == 0x1233 || pid == 0x4433;    // VT1 Pro Max (issue #136 captures)
+}
 
-bool ReadBattery(HidDev& d, Rapoo::Battery& battery, Rapoo::Profile profile) {
-    // A passive legacy report can take ~3.2 seconds. One deadline includes unrelated reports;
-    // do not flush, since a queued status report is already useful.
-    std::vector<BYTE> r;
-    return d.ReadUntil(r, 4000, [&](const std::vector<BYTE>& r) {
-        return Rapoo::DecodeBattery(r.data(), r.size(), battery, profile);
-    });
+// Keep open handles between polls (like PollXenta) so Windows buffers passive status reports
+// arriving during the 60 s refresh interval instead of missing mice whose push interval is >5 s.
+std::map<std::wstring, std::unique_ptr<HidDev>> g_rapoo;  // by collection path
+
+bool DrainQueued(HidDev& d, Rapoo::Battery& battery, Rapoo::Profile profile) {
+    bool got = false;
+    for (int i = 0; i < 64; i++) {
+        std::vector<BYTE> r;
+        if (d.Read(r, 30) < 0) break;
+        if (Rapoo::DecodeBattery(r.data(), r.size(), battery, profile)) got = true;
+    }
+    return got;
+}
+
+bool WaitBattery(HidDev& d, Rapoo::Battery& battery, Rapoo::Profile profile, ULONGLONG end) {
+    do {
+        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
+        std::vector<BYTE> r;
+        if (left <= 0 || d.Read(r, left) < 0) return false;
+        if (Rapoo::DecodeBattery(r.data(), r.size(), battery, profile)) return true;
+    } while (GetTickCount64() < end);
+    return false;
+}
+
+bool ReadBattery(std::unique_ptr<HidDev>& slot, const HidColl& c, Rapoo::Battery& battery,
+                 Rapoo::Profile profile, bool fresh) {
+    if (!fresh && DrainQueued(*slot, battery, profile)) return true;
+    // A passive report can take several seconds (VT1 Pro Max ~4 s; VT9 Gen 2 ~5-10 s on first open),
+    // so wait up to 5 s when no queued packet was buffered yet. One deadline covers unrelated packets.
+    ULONGLONG start = GetTickCount64();
+    ULONGLONG end = start + 5000;
+    if (WaitBattery(*slot, battery, profile, end)) return true;
+    // If a persistent handle failed immediately (e.g. receiver reset between polls), reopen once.
+    if (!fresh && GetTickCount64() - start < 50) {
+        slot->Close();
+        if (slot->Open(c)) return WaitBattery(*slot, battery, profile, end);
+    }
+    return false;
 }
 
 }  // namespace
 
 void PollRapoo(PollContext& ctx) {
+    std::set<std::wstring> present;
     for (auto [vid, pid] : ctx.Products(0x24AE)) {
         for (const HidColl* c : ctx.Find(vid, pid, [pid](const HidColl& c) {
                  // The other vendor collections are for configuration/firmware, not battery.
                  return c.page() == 0xFF00 && c.usage() == 0x0002 &&
-                        (c.inLen() == 19 || (c.inLen() == 7 && IsLegacyVT3Pro(pid)));
+                        (c.inLen() == 16 || c.inLen() == 19 || (c.inLen() == 7 && IsLegacyVT3Pro(pid)));
              })) {
+            present.insert(c->path);  // keep the open handle buffering while backing off
             if (g_retry.Waiting(c->path)) continue;
-            HidDev d;
-            if (!d.Open(*c)) continue;
+            auto& slot = g_rapoo[c->path];
+            bool fresh = !slot;
+            if (fresh) {
+                slot = std::make_unique<HidDev>();
+                if (!slot->Open(*c)) {
+                    g_rapoo.erase(c->path);
+                    continue;
+                }
+            }
             Rapoo::Battery battery;
             auto profile = c->inLen() == 7 ? Rapoo::Profile::LegacyVT3Pro : Rapoo::Profile::Nordic54L;
-            if (!ReadBattery(d, battery, profile)) {
+            if (!ReadBattery(slot, *c, battery, profile, fresh)) {
                 g_retry.Failed(c->path);
                 continue;
             }
@@ -113,4 +165,6 @@ void PollRapoo(PollContext& ctx) {
             break;
         }
     }
+    for (auto it = g_rapoo.begin(); it != g_rapoo.end();)
+        it = present.count(it->first) ? std::next(it) : g_rapoo.erase(it);
 }

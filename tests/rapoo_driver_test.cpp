@@ -35,7 +35,7 @@ bool HidDev::Open(const HidColl& c) {
 }
 void HidDev::Close() { h_ = INVALID_HANDLE_VALUE; }
 int HidDev::Read(std::vector<BYTE>& out, int timeoutMs) {
-    assert(timeoutMs > 0 && timeoutMs <= 4000);
+    assert(timeoutMs > 0 && timeoutMs <= 5000);
     auto& queue = reports[c_.path];
     if (queue.empty()) return -1;
     out = queue.front();
@@ -111,12 +111,76 @@ int main() {
     assert(ctx.out.size() == 1 && ctx.out[0].charging && ctx.out[0].percent == 37);
     assert(ctx.out[0].via == L"USB cable");
 
+    // VT1 Pro Max uses the same BB report (issue #136 captures).
+    ctx = {};
+    ctx.colls = { Collection(0x1233, L"vt1pm", 7) };
+    reports = { { L"vt1pm", { { 0xBB, 0xB0, 0x71, 0x84, 3, 1, 0x64 } } } };
+    PollRapoo(ctx);
+    assert(ctx.out.size() == 1 && ctx.out[0].key == L"rapoo:4433");
+    assert(ctx.out[0].name == L"Rapoo VT1 Pro Max" && ctx.out[0].percent == 100);
+    assert(!ctx.out[0].charging && ctx.out[0].via == L"2.4 GHz receiver");
+    ctx = {};
+    ctx.colls = { Collection(0x4433, L"vt1pm-cable", 7) };
+    reports = { { L"vt1pm-cable", { { 0xBB, 0xB0, 0x71, 0x84, 3, 2, 0x5F } } } };
+    PollRapoo(ctx);
+    assert(ctx.out.size() == 1 && ctx.out[0].key == L"rapoo:4433");
+    assert(ctx.out[0].charging && ctx.out[0].percent == 95 && ctx.out[0].via == L"USB cable");
+
     // The same marker does not select legacy semantics on a modern Nordic collection.
     ctx = {};
     ctx.colls = { Collection(0x1417, L"modern-legacy-marker") };
     reports = { { L"modern-legacy-marker", { { 0xBB, 0xB0, 0x81, 0x20, 3, 2, 50 } } } };
     PollRapoo(ctx);
     assert(ctx.out.empty() && ctx.claimed.empty());
+
+    // VT9 Gen 2 exposes a 16-byte Nordic 54L report on its 2.4 GHz receiver (24AE:1414) and a
+    // 19-byte report on its USB cable (24AE:4614); both merge under the same rapoo:4614 key.
+    ctx = {};
+    ctx.colls = { Collection(0x1414, L"vt9-gen2", 16) };
+    reports = { { L"vt9-gen2", { { 0x07, 0x10, 0x03, 0x40, 0x06, 0x40, 0x06, 0x01,
+                                   0x64, 0x00, 0x03, 0x01, 0x00, 0x14, 0x46, 0x01 } } } };
+    PollRapoo(ctx);
+    assert(ctx.out.size() == 1 && ctx.out[0].key == L"rapoo:4614");
+    assert(ctx.out[0].name == L"Rapoo VT9 (Gen 2)" && ctx.out[0].percent == 100);
+    assert(!ctx.out[0].charging && ctx.out[0].via == L"2.4 GHz receiver");
+
+    ctx = {};
+    ctx.colls = { Collection(0x1414, L"vt9-gen2", 16), Collection(0x4614, L"vt9-gen2-cable", 19) };
+    reports = { { L"vt9-gen2", { { 0x07, 0x10, 0x03, 0x40, 0x06, 0x40, 0x06, 0x01,
+                                   0x64, 0x00, 0x03, 0x01, 0x00, 0x14, 0x46, 0x01 } } },
+                { L"vt9-gen2-cable", { { 0x07, 0x12, 0x04, 0x80, 0x0C, 0x80, 0x0C, 0x02, 0x64, 0x00,
+                                         0x03, 0x01, 0x00, 0x14, 0x46, 0x01, 0x02, 0x02, 0x00 } } } };
+    PollRapoo(ctx);
+    assert(ctx.out.size() == 1 && ctx.out[0].key == L"rapoo:4614");
+    assert(ctx.out[0].name == L"Rapoo VT9 (Gen 2)" && ctx.out[0].percent == 100);
+    assert(ctx.out[0].charging && ctx.out[0].via == L"USB cable");
+    assert(ctx.IsClaimed(0x24AE, 0x1414) && ctx.IsClaimed(0x24AE, 0x4614));
+
+    // Persistent handle stays open between polls so queued reports are drained (newest wins)
+    // without reopening, and is forgotten once the device disappears.
+    opens = 0;
+    ctx = {};
+    ctx.colls = { Collection(0x1414, L"vt9-queued", 16) };
+    reports = { { L"vt9-queued", { { 0x07, 0x10, 0x03, 0x40, 0x06, 0x40, 0x06, 0x01,
+                                     98, 0x00, 0x03, 0x01, 0x00, 0x14, 0x46, 0x01 } } } };
+    PollRapoo(ctx);
+    assert(opens == 1 && ctx.out.size() == 1 && ctx.out[0].percent == 98);
+    ctx = {};
+    ctx.colls = { Collection(0x1414, L"vt9-queued", 16) };
+    reports = { { L"vt9-queued", { { 0x07, 0x10, 0x03, 0x40, 0x06, 0x40, 0x06, 0x01,
+                                     98, 0x00, 0x03, 0x01, 0x00, 0x14, 0x46, 0x01 },
+                                   { 0x07, 0x10, 0x03, 0x40, 0x06, 0x40, 0x06, 0x01,
+                                     97, 0x00, 0x03, 0x01, 0x00, 0x14, 0x46, 0x01 } } } };
+    PollRapoo(ctx);
+    assert(opens == 1 && ctx.out.size() == 1 && ctx.out[0].percent == 97);
+    ctx = {};
+    PollRapoo(ctx);  // unplugged: drops cached handle
+    ctx = {};
+    ctx.colls = { Collection(0x1414, L"vt9-queued", 16) };
+    reports = { { L"vt9-queued", { { 0x07, 0x10, 0x03, 0x40, 0x06, 0x40, 0x06, 0x01,
+                                     96, 0x00, 0x03, 0x01, 0x00, 0x14, 0x46, 0x01 } } } };
+    PollRapoo(ctx);
+    assert(opens == 2 && ctx.out.size() == 1 && ctx.out[0].percent == 96);
 
     // Same collection/protocol on an unlisted PID should work, without an invented model name.
     ctx = {};
