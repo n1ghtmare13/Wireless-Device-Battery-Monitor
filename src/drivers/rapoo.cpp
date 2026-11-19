@@ -9,7 +9,13 @@
 //    show the same passive 7-byte report on interface 1 / FF00:0002, sent without any request:
 //    receiver `BB B0 71 84 03 01 64` every ~3.2 s (Rapoo app: 100%), cable while charging
 //    `BB B0 71 84 03 02 5F` (state 2 = charging, 95%).
-// Legacy BB semantics are restricted to the product IDs above; other Telink firmware differs.
+//  * VT3 Pro Max (receiver 24AE:1244, issue #2258): same passive seven-byte BB B0
+//    status reports on FF00:0002. Source: https://github.com/zbndev/rapoo_battery
+// Legacy BB semantics are restricted to known product IDs; other Telink firmware differs.
+//  * VT3 Max Gen 2 receiver 1417 on another firmware revision (issue #1396) exposes a 13-byte
+//    FF00:0002 collection. Rapoo Hub's VT_nrf54L decoder reads report 07 at any length and only
+//    takes the optional fields when present, so state/percent at bytes 7/8 still fit; the mouse
+//    PID at 13..14 does not, so identity falls back to the receiver PID (same rapoo:4617 key).
 #include "drivers.h"
 #include "rapoo_protocol.h"
 
@@ -55,7 +61,8 @@ const Model* FindModel(USHORT pid) {
 // Mice confirmed to send the 7-byte BB B0 status report.
 bool IsLegacyVT3Pro(USHORT pid) {
     return pid == 0x1215 || pid == 0x4415 ||  // VT3 Pro
-           pid == 0x1233 || pid == 0x4433;    // VT1 Pro Max (issue #136 captures)
+           pid == 0x1233 || pid == 0x4433 ||  // VT1 Pro Max (issue #136 captures)
+           pid == 0x1244;                      // VT3 Pro Max receiver (issue #2258)
 }
 
 // Keep open handles between polls (like PollXenta) so Windows buffers passive status reports
@@ -106,7 +113,8 @@ void PollRapoo(PollContext& ctx) {
         for (const HidColl* c : ctx.Find(vid, pid, [pid](const HidColl& c) {
                  // The other vendor collections are for configuration/firmware, not battery.
                  return c.page() == 0xFF00 && c.usage() == 0x0002 &&
-                        (c.inLen() == 16 || c.inLen() == 19 || (c.inLen() == 7 && IsLegacyVT3Pro(pid)));
+                        (c.inLen() == 16 || c.inLen() == 19 || (c.inLen() == 13 && pid == 0x1417) ||
+                         (c.inLen() == 7 && IsLegacyVT3Pro(pid)));
              })) {
             present.insert(c->path);  // keep the open handle buffering while backing off
             if (g_retry.Waiting(c->path)) continue;
@@ -132,6 +140,8 @@ void PollRapoo(PollContext& ctx) {
             DeviceStatus s;
             s.key = L"rapoo:" + Hex4(identity);
             s.name = model ? model->name : HidProduct(*c);
+            // No confirmed cable PID for the 1244 receiver; keep its own identity/key.
+            if (pid == 0x1244) s.name = L"Rapoo VT3 Pro Max";
             if (s.name.empty() || s.name == L"Rapoo Gaming Device") s.name = L"Rapoo wireless mouse";
             s.kind = DeviceKind::Mouse;
             if (battery.connection == Rapoo::Connection::Cable ||
