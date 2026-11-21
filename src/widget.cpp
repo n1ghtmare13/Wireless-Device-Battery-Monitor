@@ -559,10 +559,20 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
         textH = std::max(textH, out[s.label].m.h);
     }
     bool stacked = !g_vertical && g_stacked && !slots.empty() && barH >= iconH + rowGap + textH + barRoom + Px(6);
-    if (g_vertical && !slots.empty()) {
+    if (g_vertical) {
         // One block per device, centred in the bar's width: icon, then the percentage (and bolt) under it.
         width = barW;
         int y = Px(6);
+        if (slots.empty()) {
+            // No devices yet (startup, or the last one disconnected): only the placeholder icon. Without this
+            // branch the row layout below would keep height = barH, and on a left / right taskbar barH is the
+            // whole screen height, so the strip covered the entire taskbar.
+            Piece& ic = out[0];
+            ic.px = (barW - ic.m.w) / 2;
+            ic.py = y;
+            height = y + ic.m.h + Px(6);
+            return out;
+        }
         for (const Slot& s : slots) {
             Piece& ic = out[s.icon];
             Piece& lb = out[s.label];

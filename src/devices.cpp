@@ -46,6 +46,7 @@ std::vector<DeviceStatus> PollAllDevices() {
                             return std::find(ignored.begin(), ignored.end(), std::make_pair(c.vid, c.pid)) != ignored.end();
                         }),
                         ctx.colls.end());
+    PollSinowealthReceiver(ctx);
     PollGlorious(ctx);
     PollAula(ctx);       // before Kysona (shares the 3554 vendor id) and SONiX (shares 05AC:024F)
     PollAulaMouse(ctx);
@@ -102,6 +103,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollMchoseKeyboard(ctx);  // 3837:3033 receiver, before the generic fallbacks
     PollMiscMice(ctx);
     PollFantech(ctx);
+    PollRaigor(ctx);
     PollRazerHeadsets(ctx);  // before the generic Razer driver, which shares the vendor id
     PollBarracudaPro(ctx);   // before the generic Razer driver as well
     PollHyperX(ctx);
@@ -125,6 +127,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollGameSir(ctx);
     PollFlydigi(ctx);
     PollGameSirCyclone(ctx);
+    PollGameSirSapjoy(ctx);  // Tarantula Pro / NovaPro: SAPJoy device info on FF A0 (Nova and Cyclone 2 above keep their ids)
     PollGameSirBle(ctx);  // Cyclone Pro: battery over BLE; claims its dongle before the XInput fallback
     Poll8BitDo(ctx);
     PollBeitong(ctx);  // before the XInput fallback, which only sees the receiver as wired
@@ -136,6 +139,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollDarkrim(ctx);
     PollAlienware(ctx);
     PollMaono(ctx);  // MAONO PD200W receiver (352F:040E), experimental battery query
+    PollPressPlayIcarus(ctx);
     PollHeadsetControl(ctx);
     PollBluetooth(ctx);   // before the generic HID check: Windows' own level wins for the same device
     PollGenericHid(ctx);

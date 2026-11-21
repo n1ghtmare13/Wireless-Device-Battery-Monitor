@@ -9,6 +9,11 @@
 // From github.com/HeyOkay/HaloBattery PR #350 (providers/atk_bitmouse.py; verified by a VXE R1 owner on
 // Windows: the level matches ATK's app, charging follows the cable) and github.com/qwr79/mouse-battery.
 //
+// ATK Zero uses the same 64-byte framing on FF05:0001, with target 00 for the 1154 cable or 01 for
+// the 124F / 1155 8K receivers. Only status 00 is fresh. Command 07 reads the level on either link,
+// and command 08 reports charging (02) on the cable. The receivers only relay the battery query.
+// Reference: github.com/Fan4Metal/mouse_tray/blob/master/mouse_tray/drivers/chipset/nordic54.py
+//
 // ATK "8K Nano Dongle" 373B:1178 (NK mouse 8K NANO dongle) is a Holtek receiver with a different protocol on
 // vendor collection FF10:0001 (65-byte input/output, 9-byte feature report, no report ids):
 //   Feature report 00, 8 bytes: [82][00 x7] (GetConfigData).
@@ -24,31 +29,69 @@ namespace {
 const USHORT kVid = 0x373B;
 const USHORT kNanoDongle = 0x1216;
 const USHORT kNano8kDongle = 0x1178;
+const USHORT kZeroCable = 0x1154;
+
+enum class BitmouseLink { NearLink, ZeroCable, ZeroReceiver };
 
 // Sends command `cmd` and returns its one-byte payload, or -1 when there is no valid reply.
-int Query(HidDev& d, BYTE cmd) {
+int Query(HidDev& d, BYTE cmd, BitmouseLink link = BitmouseLink::NearLink) {
+    const bool zero = link != BitmouseLink::NearLink;
     std::vector<BYTE> req(64, 0);
     req[0] = 0x08;
     req[2] = 0x72;
     req[3] = 0x02;  // request length
-    req[5] = 0x01;  // target: the mouse
+    req[5] = link == BitmouseLink::ZeroCable ? 0x00 : 0x01;
     req[6] = cmd;
     req[7] = 0x01;  // expected reply length
     unsigned sum = 0;
     for (size_t i = 2; i < req.size(); i++) sum += req[i];
-    req[1] = (BYTE)(sum & 0xFF);
+    req[1] = zero ? 0x7D : (BYTE)(sum & 0xFF);
     d.Flush();
+    ULONGLONG end = GetTickCount64() + 500;
     if (!d.Write(req)) return -1;
-    ULONGLONG end = GetTickCount64() + 700;
+    if (!zero) end = GetTickCount64() + 700;  // retain the NearLink reply window
     std::vector<BYTE> r;
     for (;;) {
         int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
         if (left <= 0) return -1;
         if (d.Read(r, left) < 0) return -1;
         if (r.size() < 8 || r[0] != 0x08 || r[1] != 0x72) continue;
-        if (r[5] != cmd) continue;  // a reply to another request
-        if (r[2] == 0xFF) return -1;
+        if (r[5] != cmd || (zero && r[6] != 0x01)) continue;  // a reply to another request
+        if (zero ? r[2] != 0x00 : r[2] == 0xFF) return -1;
         return r[7];
+    }
+}
+
+void PollZero(PollContext& ctx) {
+    bool reported = false;
+    // Prefer the cable for a fresh reading while charging and use the same battery history on either link.
+    for (USHORT pid : { kZeroCable, (USHORT)0x124F, (USHORT)0x1155 }) {
+        if (ctx.IsClaimed(kVid, pid)) continue;
+        for (const HidColl* c : ctx.Find(kVid, pid, [](const HidColl& c) {
+                 return c.page() == 0xFF05 && c.usage() == 0x0001 && c.outLen() == 64 && c.inLen() == 64;
+             })) {
+            ctx.Claim(kVid, pid);  // keep older Kysona frames off this collection, even when asleep
+            if (reported) break;
+            HidDev d;
+            if (!d.Open(*c)) continue;
+
+            const bool wired = pid == kZeroCable;
+            const BitmouseLink link = wired ? BitmouseLink::ZeroCable : BitmouseLink::ZeroReceiver;
+            const int level = Query(d, 0x07, link);
+            if (level < 0 || level > 100) continue;
+
+            DeviceStatus s;
+            s.key = L"atkzero:" + Hex4(kZeroCable);
+            s.name = L"ATK Zero";
+            s.kind = DeviceKind::Mouse;
+            s.via = wired ? L"USB cable" : L"2.4 GHz receiver";
+            s.graceSec = 1800;
+            s.percent = level;
+            s.charging = wired && Query(d, 0x08, link) == 0x02;
+            ctx.Add(s, kVid, pid);
+            reported = true;
+            break;
+        }
     }
 }
 
@@ -101,6 +144,7 @@ void PollNano8k(PollContext& ctx) {
 }  // namespace
 
 void PollAtkBitmouse(PollContext& ctx) {
+    PollZero(ctx);
     PollNano8k(ctx);
     if (ctx.IsClaimed(kVid, kNanoDongle)) return;
     for (const HidColl* c : ctx.Find(kVid, kNanoDongle, [](const HidColl& c) {

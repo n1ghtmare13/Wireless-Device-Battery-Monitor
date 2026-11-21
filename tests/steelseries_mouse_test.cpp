@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <map>
 
 namespace {
 void Check(bool condition, const char* expression, int line) {
@@ -21,6 +22,7 @@ bool writeOk = true;
 int writes = 0, replyOnWrite = 1;
 std::vector<BYTE> reply, noise;
 std::deque<std::vector<BYTE>> queued;
+std::map<USHORT, std::vector<BYTE>> repliesByPid;
 
 HidColl Collection(USHORT pid) {
     HidColl c;
@@ -44,7 +46,7 @@ PollContext Poll(USHORT pid, BYTE command, std::vector<BYTE> payload) {
     return ctx;
 }
 
-struct Model { USHORT pid; bool wired; const wchar_t* name; };
+struct Model { USHORT pid; bool wired; const wchar_t* name; const wchar_t* key; };
 struct Sample { std::vector<BYTE> payload; int percent; bool charging, connected; };
 
 void Expect(const Model& model, const Sample& sample) {
@@ -60,7 +62,7 @@ void Expect(const Model& model, const Sample& sample) {
     }
     CHECK(s.name == model.name);
     CHECK(s.graceSec == 1800);  // the last level stays, dimmed, while the mouse is off or asleep
-    CHECK(s.key == L"steelseries:" + Hex4(model.pid));
+    CHECK(s.key == model.key);
     CHECK(s.kind == DeviceKind::Mouse);
     CHECK(s.via == (model.wired ? L"USB cable" : L"2.4 GHz receiver"));
 }
@@ -69,12 +71,36 @@ void ExpectNothing(USHORT pid, BYTE command, std::vector<BYTE> payload) {
     auto ctx = Poll(pid, command, payload);
     CHECK(ctx.out.empty() && ctx.claimed.empty());
 }
+
+void ExpectOneMouse(const Model& receiver, const Model& cable,
+                    std::vector<BYTE> wireless = { 0xD2, 0x0A }, std::vector<BYTE> wired = { 0x92, 0x94 }) {
+    repliesByPid = { { receiver.pid, wireless }, { cable.pid, wired } };
+    PollContext ctx;
+    ctx.colls = { Collection(cable.pid), Collection(receiver.pid) };
+    PollSteelSeries(ctx);
+    CHECK(ctx.out.size() == 1);
+    CHECK(ctx.IsClaimed(0x1038, receiver.pid) && ctx.IsClaimed(0x1038, cable.pid));
+    const auto& s = ctx.out.front();
+    CHECK(s.key == receiver.key && s.name == receiver.name);
+    CHECK(s.via == L"USB cable" && s.percent == 95 && s.charging);
+    CHECK(s.vid == 0x1038);
+    repliesByPid.clear();
+    // Unplugging the cable must keep the same key and return to the wireless level.
+    Expect(receiver, { std::vector<BYTE>(wireless.begin() + 1, wireless.end()), 45, false, true });
+}
 }  // namespace
 
 bool HidDev::Open(const HidColl& c) { c_ = c; h_ = reinterpret_cast<HANDLE>(1); return true; }
 void HidDev::Close() { h_ = INVALID_HANDLE_VALUE; }
 void HidDev::Flush() { queued.clear(); }
 bool HidDev::Write(const std::vector<BYTE>& data, int) {
+    if (!repliesByPid.empty()) {
+        auto it = repliesByPid.find(c_.pid);
+        CHECK(it != repliesByPid.end());
+        CHECK(data == std::vector<BYTE>({ 0x00, it->second[0] }));
+        queued.push_back(it->second);
+        return true;
+    }
     CHECK(data == std::vector<BYTE>({ 0x00, expectedCommand }));
     if (!writeOk) return false;
     ++writes;
@@ -103,16 +129,17 @@ int MapTo100(int v, int lo, int hi) { return Clamp100((v - lo) * 100 / (hi - lo)
 int main() {
     // Step layout: [1] = (level/5 + 1) | charging<<7.
     const Model stepModels[] = {
-        { 0x1838, false, L"SteelSeries Aerox 3 Wireless" },
-        { 0x183A, true, L"SteelSeries Aerox 3 Wireless" },
-        { 0x1878, false, L"SteelSeries Aerox 3 Wireless CS2 Dragon Lore Edition" },
-        { 0x187A, true, L"SteelSeries Aerox 3 Wireless CS2 Dragon Lore Edition" },
-        { 0x1852, false, L"SteelSeries Aerox 5 Wireless" },
-        { 0x1854, true, L"SteelSeries Aerox 5 Wireless" },
-        { 0x1858, false, L"SteelSeries Aerox 9 Wireless" },
-        { 0x185A, true, L"SteelSeries Aerox 9 Wireless" },
-        { 0x1840, false, L"SteelSeries Prime Wireless" },
-        { 0x1842, true, L"SteelSeries Prime Wireless" },
+        { 0x1838, false, L"SteelSeries Aerox 3 Wireless", L"steelseries:1838" },
+        { 0x183A, true, L"SteelSeries Aerox 3 Wireless", L"steelseries:1838" },
+        { 0x1878, false, L"SteelSeries Aerox 3 Wireless CS2 Dragon Lore Edition", L"steelseries:1878" },
+        { 0x187A, true, L"SteelSeries Aerox 3 Wireless CS2 Dragon Lore Edition", L"steelseries:1878" },
+        { 0x1852, false, L"SteelSeries Aerox 5 Wireless", L"steelseries:1852" },
+        { 0x1854, true, L"SteelSeries Aerox 5 Wireless", L"steelseries:1852" },
+        { 0x1858, false, L"SteelSeries Aerox 9 Wireless", L"steelseries:1858" },
+        { 0x185A, true, L"SteelSeries Aerox 9 Wireless", L"steelseries:1858" },
+        { 0x1840, false, L"SteelSeries Prime Wireless", L"steelseries:1840" },
+        { 0x1842, true, L"SteelSeries Prime Wireless", L"steelseries:1840" },
+        { 0x1860, false, L"SteelSeries Aerox 5 Wireless Diablo IV Edition", L"steelseries:1860" },
     };
     const Sample stepSamples[] = {
         { { 0x01 }, 0, false, true }, { { 0x13 }, 90, false, true }, { { 0x15 }, 100, false, true },
@@ -131,9 +158,11 @@ int main() {
         ExpectNothing(model.pid, model.wired ? 0x92 : 0xD2, { 0x80 });
     }
 
+    for (size_t i = 0; i + 1 < std::size(stepModels); i += 2) ExpectOneMouse(stepModels[i], stepModels[i + 1]);
+
     // Percent layout (Aerox 3 Wireless Gen 2): [1] 00 battery / 01 charging / 02 charged, [2] level.
-    const Model gen2[] = { { 0x1890, false, L"SteelSeries Aerox 3 Wireless Gen 2" },
-                           { 0x1892, true, L"SteelSeries Aerox 3 Wireless Gen 2" } };
+    const Model gen2[] = { { 0x1890, false, L"SteelSeries Aerox 3 Wireless Gen 2", L"steelseries:1890" },
+                           { 0x1892, true, L"SteelSeries Aerox 3 Wireless Gen 2", L"steelseries:1890" } };
     for (const auto& model : gen2) {
         // Captured on hardware in rivalcfg issue #276.
         Expect(model, { { 0x00, 0x61, 0x00 }, 97, false, true });
@@ -151,11 +180,15 @@ int main() {
         ExpectNothing(model.pid, command, { 0x01 });              // too short for the level byte
     }
 
+    ExpectOneMouse(gen2[0], gen2[1], { 0xD2, 0x00, 0x2D }, { 0x92, 0x01, 0x5F });
+
     // Reports that do not echo the command are skipped (an acknowledgement, then the reply).
     noise = { 0x11, 0x00 };
     Expect(stepModels[2], { { 0x0A }, 45, false, true });
     // GG talking over the query: its reports keep coming and the receiver answers the third write.
-    noise = { 0x61, 0x00, 0x00, 0x34, 0x2E, 0x31 };
+    // Captured on an original Aerox 3: the installed one-read driver misread this as "off".
+    noise = { 0x61, 0x00, 0x31, 0x31, 0x2E, 0x34, 0x00, 0x00 };
+    Expect(stepModels[0], { { 0x0A, 0x31, 0x31, 0x2E, 0x34, 0x00, 0x00 }, 45, false, true });
     replyOnWrite = 3;
     Expect(stepModels[2], { { 0x0A }, 45, false, true });
     CHECK(writes == 3);
@@ -177,6 +210,6 @@ int main() {
     CHECK(writes == 0);
     writeOk = true;
     ExpectNothing(0x1838, 0xD2, {});  // receiver never answers
-    std::puts("SteelSeries mouse tests passed (step and Gen 2 layouts, 12 models, USB/wireless, battery bounds, "
-              "charging, off/asleep left out, echo filtering, resend, receiver NACK, I/O failures).");
+    std::puts("SteelSeries mouse tests passed (step and Gen 2 layouts, 13 models, USB/wireless, battery bounds, "
+              "charging, shared cable/receiver identity, off/asleep left out, echo filtering, resend, receiver NACK, I/O failures).");
 }

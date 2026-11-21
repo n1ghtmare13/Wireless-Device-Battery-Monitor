@@ -1,6 +1,7 @@
 // Razer BlackShark headsets with their own vendor protocol (not the 90-byte Razer feature report).
 //
-// BlackShark V3 / V3 Pro (1532:0576/0577 V3 Pro, 0579/057A V3), interface 5; V3 X further down.
+// BlackShark V3 / V3 Pro (1532:0576/0577 V3 Pro, 0579/057A V3, 0A4E/0A55 V3 Pro for Xbox), interface 5;
+// V3 X further down.
 // 64-byte output report 02: [02][00][60][00 00][00][size][00 00][dir][class][sub][argc][args]..
 // [62] = XOR of bytes 0..61. GET battery = class 21 -> reply args [level %][charging].
 // The headset drops its 2.4 GHz link if the battery is queried every few seconds, so it is asked at
@@ -76,9 +77,12 @@ bool Get(HidDev& d, BYTE cls, std::vector<BYTE>& reply) {
 struct Cached { ULONGLONG at = 0; DeviceStatus status; bool valid = false; };
 std::map<USHORT, Cached> g_cache;
 
-const wchar_t* Name(USHORT pid) { return (pid == 0x0576 || pid == 0x0577) ? L"Razer BlackShark V3 Pro" : L"Razer BlackShark V3"; }
+const wchar_t* Name(USHORT pid) {
+    if (pid == 0x0A4E || pid == 0x0A55) return L"Razer BlackShark V3 Pro for Xbox";
+    return (pid == 0x0576 || pid == 0x0577) ? L"Razer BlackShark V3 Pro" : L"Razer BlackShark V3";
+}
 // The lower id of each pair is the USB cable, the higher one the wireless receiver (0579 cable / 057A receiver).
-bool Cable(USHORT pid) { return pid == 0x0576 || pid == 0x0579; }
+bool Cable(USHORT pid) { return pid == 0x0576 || pid == 0x0579 || pid == 0x0A4E; }
 
 // ---- BlackShark V2 HyperSpeed: MediaTek vendor HID (NOT V2 Pro PA protocol) ----------------------
 // Based on justik13/razer-blackshark-v2-hyperspeed-webhid (MIT).
@@ -482,7 +486,8 @@ void PollRazerHeadsets(PollContext& ctx) {
     PollBlackSharkV2Pro2020(ctx);
     PollBlackSharkV2Pro2023(ctx);
     PollBlackSharkV3X(ctx);
-    for (USHORT pid : { (USHORT)0x0576, (USHORT)0x0577, (USHORT)0x0579, (USHORT)0x057A }) {
+    for (USHORT pid : { (USHORT)0x0576, (USHORT)0x0577, (USHORT)0x0579, (USHORT)0x057A, (USHORT)0x0A4E,
+                        (USHORT)0x0A55 }) {
         if (ctx.IsClaimed(0x1532, pid)) continue;
         auto colls = ctx.Find(0x1532, pid, [](const HidColl& c) { return c.iface == 5 && c.outLen() >= 64 && c.inLen() >= 15; });
         if (colls.empty()) continue;

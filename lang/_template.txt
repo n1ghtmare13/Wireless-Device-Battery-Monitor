@@ -72,6 +72,7 @@ Clear battery history for this device? =
 Could not save history changes. =
 Hide last known / asleep devices = 
 Show disconnected devices =
+Dim sleeping devices =
 Record battery history =
 Show on the taskbar (icon + percentage) = 
 Show as tray icons = 

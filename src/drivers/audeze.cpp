@@ -19,9 +19,10 @@
 namespace {
 
 constexpr USHORT kVid = 0x3329;
-struct Model { USHORT pid; bool cable; };
-const Model kModels[] = { { 0x4B1A, true }, { 0x4B1E, true },  // cables first: the direct connection wins
-                          { 0x4B19, false }, { 0x4B18, false }, { 0x4B29, false }, { 0x4B28, false } };
+struct Model { USHORT pid; bool cable; const wchar_t* name; };
+const Model kModels[] = { { 0x4B1A, true, L"Audeze Maxwell" }, { 0x4B1E, true, L"Audeze Maxwell" },  // cables first: the direct connection wins
+                          { 0x4B19, false, L"Audeze Maxwell" }, { 0x4B18, false, L"Audeze Maxwell" },
+                          { 0x4B29, false, L"Audeze Maxwell 2" }, { 0x4B28, false, L"Audeze Maxwell 2" } };
 
 int FindLevel(const std::vector<BYTE>& b) {
     for (size_t i = 0; i + 4 < b.size(); i++)
@@ -35,14 +36,18 @@ int ReadLevel(const HidColl& c) {
     std::vector<BYTE> req(62, 0);
     BYTE q[] = { 0x06, 0x07, 0x80, 0x05, 0x5A, 0x03, 0x00, 0xD6, 0x0C };
     std::copy(std::begin(q), std::end(q), req.begin());
-    if (!d.Write(req)) return -1;
     int level = -1;
-    for (int i = 0; i < 3; i++) {  // the answer can arrive a little later; the newest frame counts
-        Sleep(60);
-        std::vector<BYTE> r;
-        if (!d.GetInputReport(0x07, r)) continue;
-        int l = FindLevel(r);
-        if (l >= 0) level = l;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (!d.Write(req)) return -1;
+        for (int i = 0; i < 4; i++) {  // the answer can arrive a little later; the newest frame counts
+            Sleep(60);
+            std::vector<BYTE> r;
+            if (!d.GetInputReport(0x07, r)) continue;
+            int l = FindLevel(r);
+            if (l >= 0) level = l;
+            if (i >= 2 && level >= 0) return level;
+        }
+        if (level >= 0) return level;
     }
     return level;
 }
@@ -71,7 +76,7 @@ void PollAudeze(PollContext& ctx) {
         if (!firstSeen.count(m.pid)) firstSeen[m.pid] = now;
         DeviceStatus s;
         s.key = L"audeze:maxwell";  // dongle and cable are one headset
-        s.name = L"Audeze Maxwell";
+        s.name = m.name;
         s.kind = DeviceKind::Headset;
         s.via = m.cable ? L"USB cable" : L"2.4 GHz dongle";
         s.graceSec = 300;

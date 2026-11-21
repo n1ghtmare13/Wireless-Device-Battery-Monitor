@@ -24,6 +24,7 @@ const USHORT kBragiPids[] = { 0x2A08, 0x2A02, 0x0A97, 0x0A64, 0x0A62, 0x0A3E, 0x
 struct CorsairCompxModel { USHORT pid; const wchar_t* name; };
 const CorsairCompxModel kCorsairCompxModels[] = {
     { 0x2B2A, L"Corsair Sabre V2 Pro Ultralight" },
+    { 0x2B34, L"Corsair Sabre v2 PRO WIRELESS MG" },  // device request #2563, untested
 };
 const CorsairCompxModel* FindCorsairCompxModel(USHORT pid) {
     for (const auto& m : kCorsairCompxModels) if (m.pid == pid) return &m;

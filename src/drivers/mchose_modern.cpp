@@ -20,7 +20,14 @@
 // matching M HUB, and on the same mouse plugged in by cable (3837:4028): 25% with charge status 1.
 // The G3 V2 driver (mchose_g3.cpp) speaks a different protocol on FF01:0010; this one needs FF01:0001
 // and report 0x4D, which the 0x1014 receiver does not expose through the feature-report path.
+// K87 V3 keyboard receiver 3837:1015 uses the same command on FF80:0001, with a 20-byte payload
+// and paired model 2023. Hardware reports and protocol discovery: HOSTErss, repository PR #2934.
+// Keyboard queries are spaced three minutes apart to avoid repeatedly waking an idle keyboard.
 #include "drivers.h"
+
+#include <algorithm>
+#include <map>
+#include <set>
 
 namespace {
 
@@ -30,6 +37,7 @@ const USHORT kVid = 0x3837;
 struct Target {
     USHORT pid;
     const wchar_t* via;
+    bool keyboard = false;
 };
 const Target kTargets[] = {
     { 0x1014, L"2.4 GHz receiver" },
@@ -38,6 +46,7 @@ const Target kTargets[] = {
     { 0x102C, L"2.4 GHz receiver" },
     { 0x102D, L"2.4 GHz receiver" },
     { 0x4028, L"USB cable" },
+    { 0x1015, L"2.4 GHz receiver", true },
 };
 
 const BYTE kReport = 0x4D;
@@ -51,7 +60,7 @@ BYTE Xor(const std::vector<BYTE>& b, size_t from, size_t to) {  // both ends inc
 }
 
 // Returns 1 for a status frame, 0 for a valid frame that says the mouse is not linked, -1 otherwise.
-int ParseInfo(const std::vector<BYTE>& r, int& percent, bool& charging) {
+int ParseInfo(const std::vector<BYTE>& r, bool keyboard, int& percent, bool& charging) {
     if (r.size() < kData + 2 || r[0] != kReport) return -1;
     if ((USHORT)(r[4] | (r[5] << 8)) != kCmdDeviceInfo) return -1;
     const size_t len = r[3];
@@ -59,9 +68,10 @@ int ParseInfo(const std::vector<BYTE>& r, int& percent, bool& charging) {
     // While the mouse is off or asleep the receiver answers with the header only, a single 0xFF in
     // place of the model id and a zeroed data area (4D 01 01 01 00 09 00 00 FF 00 ...), so anything
     // shorter than the 14-byte device-info payload means "not linked" rather than "bad checksum".
-    if (len < 14) return 0;
+    if (len < 14) return keyboard ? (len == 1 && r[kData] == 0xFF ? 0 : -1) : 0;
     if (r[kData + len] != Xor(r, 2, 7 + len)) return -1;
     if ((USHORT)(r[kData] | (r[kData + 1] << 8)) != kVid) return -1;
+    if (keyboard && (len < 20 || r[kData + 2] != 0x23 || r[kData + 3] != 0x20)) return -1;
     if (r[kData + 10] == 0) return 0;  // not linked: the mouse is off or asleep
     if (r[kData + 12] > 100) return -1;
     percent = r[kData + 12];
@@ -69,47 +79,79 @@ int ParseInfo(const std::vector<BYTE>& r, int& percent, bool& charging) {
     return 1;
 }
 
+struct KeyboardPoll {
+    ULONGLONG nextAsk = 0;
+    DeviceStatus status;
+};
+std::map<std::wstring, KeyboardPoll> g_keyboards;  // removed when the receiver disappears
+
+int QueryInfo(HidDev& d, const HidColl& c, bool keyboard, int& percent, bool& charging) {
+    // One deadline includes writes, retry delays and unrelated input reports, rather than giving
+    // each retry a fresh second. This is an active query, so a silent collection gets at most 1 s.
+    const ULONGLONG deadline = GetTickCount64() + 1000;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        int left = (int)((LONGLONG)deadline - (LONGLONG)GetTickCount64());
+        if (attempt) {
+            if (left <= 150) break;
+            Sleep(150);
+            left = (int)((LONGLONG)deadline - (LONGLONG)GetTickCount64());
+        }
+        if (left <= 0) break;
+        std::vector<BYTE> req(c.outLen(), 0);
+        req[0] = kReport;
+        req[1] = 0x01;
+        req[2] = 0x01;
+        req[4] = (BYTE)(kCmdDeviceInfo & 0xFF);
+        req[5] = (BYTE)(kCmdDeviceInfo >> 8);
+        req[kData] = Xor(req, 2, 7);
+        if (!d.Write(req, std::min(left, 250))) continue;
+        const ULONGLONG end = std::min(deadline, GetTickCount64() + 250);
+        std::vector<BYTE> r;
+        while ((left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64())) > 0) {
+            if (d.Read(r, left) < 0) break;
+            int state = ParseInfo(r, keyboard, percent, charging);
+            if (state >= 0) return state;
+        }
+    }
+    return -1;
+}
+
 }  // namespace
 
 void PollMchoseModern(PollContext& ctx) {
+    std::set<std::wstring> present;
+    for (const HidColl& c : ctx.colls)
+        if (c.vid == kVid && c.pid == 0x1015) present.insert(c.path);
+    for (auto it = g_keyboards.begin(); it != g_keyboards.end();)
+        it = present.count(it->first) ? std::next(it) : g_keyboards.erase(it);
     for (const Target& t : kTargets) {
-        for (const HidColl* c : ctx.Find(kVid, t.pid, [](const HidColl& c) {
+        if (ctx.IsClaimed(kVid, t.pid)) continue;
+        for (const HidColl* c : ctx.Find(kVid, t.pid, [&t](const HidColl& c) {
+                 if (t.keyboard)
+                     return c.page() == 0xFF80 && c.usage() == 1 && c.outLen() == 64 && c.inLen() == 64;
                  return (c.page() == 0xFF01 || c.page() == 0xFF0B) && c.outLen() >= 64 && c.inLen() >= 21;
              })) {
+            if (t.keyboard) {
+                auto it = g_keyboards.find(c->path);
+                if (it != g_keyboards.end() && GetTickCount64() < it->second.nextAsk) {
+                    ctx.Add(it->second.status, kVid, t.pid);
+                    break;
+                }
+            }
             HidDev d;
             if (!d.Open(*c)) continue;
             d.Flush();
-            int state = -1, percent = -1;
+            int percent = -1;
             bool charging = false;
-            for (int attempt = 0; attempt < 3 && state < 0; attempt++) {
-                if (attempt) Sleep(150);
-                std::vector<BYTE> req(c->outLen(), 0);
-                req[0] = kReport;
-                req[1] = 0x01;
-                req[2] = 0x01;  // read
-                req[4] = (BYTE)(kCmdDeviceInfo & 0xFF);
-                req[5] = (BYTE)(kCmdDeviceInfo >> 8);
-                req[kData] = Xor(req, 2, 7);
-                if (!d.Write(req)) continue;
-                ULONGLONG end = GetTickCount64() + 1000;
-                std::vector<BYTE> r;
-                while ((LONGLONG)end - (LONGLONG)GetTickCount64() > 0) {
-                    int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
-                    int n = d.Read(r, left);
-                    if (n < 0) break;
-                    int st = ParseInfo(r, percent, charging);
-                    if (st >= 0) {
-                        state = st;
-                        break;
-                    }
-                }
-            }
-            if (state < 0) continue;
+            int state = QueryInfo(d, *c, t.keyboard, percent, charging);
+            if (state < 0 && !t.keyboard) continue;
             DeviceStatus s;
             s.key = L"mchose:" + Hex4(kVid) + L":" + Hex4(t.pid);
             s.name = HidProduct(*c);
-            if (s.name.empty()) s.name = L"MCHOSE mouse";
-            s.kind = DeviceKind::Mouse;
+            if (s.name.empty()) s.name = t.keyboard ? L"MCHOSE K87 V3" : L"MCHOSE mouse";
+            if (t.keyboard && s.name.size() > 5 && s.name.compare(s.name.size() - 5, 5, L" 2.4G") == 0)
+                s.name.resize(s.name.size() - 5);
+            s.kind = t.keyboard ? DeviceKind::Keyboard : DeviceKind::Mouse;
             s.via = t.via;
             s.graceSec = 1800;
             if (state == 1) {
@@ -118,6 +160,7 @@ void PollMchoseModern(PollContext& ctx) {
             } else {
                 s.asleep = true;
             }
+            if (t.keyboard) g_keyboards[c->path] = { GetTickCount64() + 3 * 60 * 1000, s };
             ctx.Add(s, kVid, t.pid);
             break;
         }
