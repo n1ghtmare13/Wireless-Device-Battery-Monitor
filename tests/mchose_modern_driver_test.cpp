@@ -9,6 +9,7 @@ namespace {
 std::vector<std::vector<BYTE>> pending;
 int opens = 0;
 int writes = 0;
+bool consumeTimeout = false;
 
 HidColl Collection(USHORT pid = 0x1014, USHORT page = 0xFF01, USHORT outLen = 64, USHORT inLen = 64) {
     HidColl c;
@@ -66,11 +67,21 @@ PollContext Poll(std::vector<std::vector<BYTE>> replies, const HidColl& c = Coll
 // Stand-ins for the Win32 HID transport. The production driver is linked unchanged.
 bool HidDev::Open(const HidColl& c) {
     c_ = c;
+#ifdef _WIN32
     h_ = reinterpret_cast<HANDLE>(1);
+#else
+    fd_ = 1;
+#endif
     ++opens;
     return true;
 }
-void HidDev::Close() { h_ = INVALID_HANDLE_VALUE; }
+void HidDev::Close() {
+#ifdef _WIN32
+    h_ = INVALID_HANDLE_VALUE;
+#else
+    fd_ = -1;
+#endif
+}
 // The scripted replies stand for what the receiver will answer next, so there is nothing stale to drop.
 void HidDev::Flush() {}
 bool HidDev::Write(const std::vector<BYTE>& data, int) {
@@ -84,12 +95,17 @@ bool HidDev::Write(const std::vector<BYTE>& data, int) {
 }
 int HidDev::Read(std::vector<BYTE>& out, int timeoutMs) {
     assert(timeoutMs > 0 && timeoutMs <= 1000);
-    if (pending.empty()) return -1;
+    if (pending.empty()) {
+        if (consumeTimeout) Sleep(timeoutMs);
+        return -1;
+    }
     out = pending.front();
     pending.erase(pending.begin());
     return (int)out.size();
 }
-std::wstring HidProduct(const HidColl&) { return L"MCHOSE K7 V2 Ultra+"; }
+std::wstring HidProduct(const HidColl& c) {
+    return c.pid == 0x1015 ? L"MCHOSE K87 V3 2.4G" : L"MCHOSE K7 V2 Ultra+";
+}
 std::wstring Hex4(USHORT v) {
     wchar_t text[8];
     swprintf(text, 8, L"%04X", v);
@@ -175,5 +191,63 @@ int main() {
     ctx = Poll({ Reply(2, 0, 45) }, Collection(0x102D, 0xFF0B));
     assert(ctx.out.size() == 1 && ctx.out[0].key == L"mchose:3837:102D");
 
-    puts("MCHOSE modern driver tests passed");
+    // K87 V3: same device-info command, different exact collection and a 20-byte payload.
+    auto keyboard = Collection(0x1015, 0xFF80);
+    auto keyboardReply = Reply(2, 1, 98);
+    keyboardReply[3] = 20;
+    keyboardReply[10] = 0x23;
+    keyboardReply[11] = 0x20;
+    keyboardReply[24] = 0;
+    keyboardReply[28] = 0;
+    for (int i = 2; i <= 27; i++) keyboardReply[28] ^= keyboardReply[i];
+    ctx = Poll({ keyboardReply }, keyboard);
+    assert(ctx.out.size() == 1 && ctx.out[0].percent == 98 && ctx.out[0].charging);
+    assert(ctx.out[0].kind == DeviceKind::Keyboard && ctx.out[0].name == L"MCHOSE K87 V3");
+    assert(ctx.out[0].key == L"mchose:3837:1015" && writes == 1);
+    // Polling again immediately must not wake the keyboard with another request.
+    ctx = Poll({}, keyboard);
+    assert(ctx.out.size() == 1 && ctx.out[0].percent == 98 && writes == 0);
+
+    auto unplug = [] {
+        PollContext empty;
+        PollMchoseModern(empty);
+    };
+    unplug();
+    ctx = Poll({ NotLinked() }, keyboard);
+    assert(ctx.out.size() == 1 && ctx.out[0].percent == -1 && ctx.out[0].asleep);
+    assert(!ctx.out[0].charging && writes == 1);
+    ctx = Poll({}, keyboard);
+    assert(ctx.out.size() == 1 && ctx.out[0].asleep && !ctx.out[0].charging && writes == 0);
+
+    // Replugging clears both the request throttle and any earlier charged reading.
+    unplug();
+    consumeTimeout = true;
+    ULONGLONG started = GetTickCount64();
+    ctx = Poll({}, keyboard);
+    ULONGLONG elapsed = GetTickCount64() - started;
+    consumeTimeout = false;
+    assert(elapsed >= 900 && elapsed < 1500);  // shared 1 s deadline, including retry delays
+    assert(ctx.out.size() == 1 && ctx.out[0].percent == -1 && ctx.out[0].asleep);
+    assert(!ctx.out[0].charging);  // silence must never turn an unknown level into 0%
+    unplug();
+
+    for (int bad : { 0, 1, 2, 3 }) {
+        auto r = keyboardReply;
+        if (bad == 0) r[28] ^= 1;  // checksum
+        if (bad == 1) { r[10] ^= 1; r[28] ^= 1; }  // another paired model
+        if (bad == 2) { r[20] = 101; r[28] ^= 98 ^ 101; }
+        if (bad == 3) { r[3] = 12; r[8] = 0; }  // not the documented offline sentinel
+        ctx = Poll({ r }, keyboard);
+        assert(ctx.out.size() == 1 && ctx.out[0].percent == -1 && ctx.out[0].asleep);
+        assert(!ctx.out[0].charging);
+        unplug();
+    }
+    before = opens;
+    ctx = Poll({}, Collection(0x1015, 0xFF01));  // never send mouse protocol probes on another collection
+    assert(ctx.out.empty() && opens == before);
+    keyboard.caps.Usage = 2;
+    ctx = Poll({}, keyboard);
+    assert(ctx.out.empty() && opens == before);
+
+    puts("MCHOSE modern mouse and K87 V3 keyboard driver tests passed");
 }

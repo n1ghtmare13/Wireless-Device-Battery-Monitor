@@ -8,6 +8,8 @@
 // Reference: github.com/openrazer/openrazer (protocol documentation in its driver sources).
 #include "drivers.h"
 
+#include <algorithm>
+
 namespace {
 
 BYTE KeyboardBatteryTid(USHORT pid) {
@@ -114,7 +116,7 @@ DeviceKind Kind(const std::vector<HidColl>& colls, USHORT vid, USHORT pid) {
 }  // namespace
 
 void PollRazer(PollContext& ctx) {
-    std::vector<std::wstring> seenNames;
+    const auto firstRazer = ctx.out.size();
     for (auto [vid, pid] : ctx.Products(0x1532)) {
         for (const HidColl* c : ctx.Find(vid, pid, [](const HidColl& c) { return c.featLen() == 91; })) {
             HidDev d;
@@ -148,16 +150,18 @@ void PollRazer(PollContext& ctx) {
                 std::vector<BYTE> ch;
                 if (Command(d, tid, 0x07, 0x84, 0x02, ch) == Rz::Ok) s.charging = ch[1] == 1;
             }
-            // A wireless mouse plugged in for charging shows up twice (cable + dongle); keep one.
-            bool dup = false;
-            for (auto& n : seenNames) dup |= n == s.name;
-            if (!dup) {
-                seenNames.push_back(s.name);
+            // Cable + receiver can report the same device; keep a live reading over an offline receiver.
+            auto existing = std::find_if(ctx.out.begin() + firstRazer, ctx.out.end(),
+                                         [&](const DeviceStatus& o) { return o.name == s.name; });
+            if (existing == ctx.out.end()) {
                 ctx.Add(s, vid, pid);
             } else {
                 ctx.Claim(vid, pid);
-                for (auto& o : ctx.out)
-                    if (o.name == s.name && s.charging) o.charging = true;
+                if (!existing->connected && s.connected) {
+                    existing->connected = true;
+                    existing->percent = s.percent;
+                }
+                existing->charging |= s.charging;
             }
             break;
         }

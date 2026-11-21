@@ -45,7 +45,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
-    ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY,
+    ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DIM_SLEEPING,
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
     ID_UPDATE = 200, ID_AUTO_UPDATE,
     ID_LANG_AUTO = 400, ID_LANG_ADD, ID_LANG_FIRST,  // "Language": ID_LANG_FIRST + 0..63
@@ -72,6 +72,7 @@ bool g_wantWidget = true;      // user's choice: taskbar widget (default) or tra
 bool g_useWidget = false;      // what is actually shown right now
 bool g_hideLastKnown = false;  // hide (last known) / asleep devices from taskbar and tray
 bool g_showDisconnectedDevices = false;  // opt-in, explicit driver-reported offline devices only
+bool g_dimSleeping = true;  // dim a sleeping device's last known value (menu option, on by default)
 bool g_recordHistory = true;  // save readings for "Battery history..." (menu option, on by default)
 std::wstring g_widgetMonitor = L"all";  // which taskbars show the widget: "all", "main" or one monitor id
 bool g_widgetBackground = false;  // draw a plate behind the taskbar text (transparent taskbar themes)
@@ -203,6 +204,14 @@ bool IsEntryHidden(const TrayEntry& e) {
     return g_hideLastKnown && (e.st.asleep || (e.st.percent < 0 && e.lastPct >= 0));
 }
 
+bool ShouldDim(const DeviceStatus& s) {
+    // An explicitly offline device keeps its dimmed "x", whatever the sleeping-device choice is.
+    if (!s.connected) return true;
+    // A sleeping device has no fresh reading: keep the last one, optionally at full brightness.
+    if (s.asleep && !g_dimSleeping) return false;
+    return s.percent < 0;
+}
+
 bool LoadBoolSetting(const wchar_t* name, bool defaultVal) {
     DWORD v = defaultVal ? 1 : 0, sz = sizeof(v);
     RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_DWORD, nullptr, &v, &sz);
@@ -261,6 +270,8 @@ bool LoadHideLastKnown() { return LoadBoolSetting(L"HideLastKnownDevices", false
 void SaveHideLastKnown(bool on) { SaveBoolSetting(L"HideLastKnownDevices", on); }
 bool LoadShowDisconnectedDevices() { return LoadBoolSetting(L"ShowDisconnectedDevices", false); }
 void SaveShowDisconnectedDevices(bool on) { SaveBoolSetting(L"ShowDisconnectedDevices", on); }
+bool LoadDimSleeping() { return LoadBoolSetting(L"DimSleepingDevices", true); }
+void SaveDimSleeping(bool on) { SaveBoolSetting(L"DimSleepingDevices", on); }
 bool LoadRecordHistory() { return LoadBoolSetting(L"RecordBatteryHistory", true); }
 void SaveRecordHistory(bool on) { SaveBoolSetting(L"RecordBatteryHistory", on); }
 bool LoadWidgetBackground() { return LoadBoolSetting(L"WidgetBackground", false); }
@@ -521,7 +532,7 @@ void ApplyEntry(TrayEntry& e) {
     }
     // Never display an old percentage as a live reading for an explicitly offline device.
     int shown = !s.connected ? -1 : (s.percent >= 0 ? s.percent : e.lastPct);
-    bool dim = !s.connected || s.percent < 0;
+    bool dim = ShouldDim(s);
     // Fully charged on power: the normal green bar instead of the blue charging one.
     bool charging = s.connected && !s.asleep && s.charging && !s.full && shown < 100;
     Accent accent = AccentFor(s);
@@ -591,7 +602,7 @@ void UpdateWidget() {
         else if (e->st.percent >= 0) it.text = T(e->st.levelText);
         it.charging = !offline && !e->st.asleep && e->st.charging;
         it.full = !offline && (e->st.full || (e->st.charging && it.percent >= 100));
-        it.dim = offline || e->st.percent < 0;
+        it.dim = ShouldDim(e->st);
         it.low = !offline && !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
         it.bluetooth = e->st.via == L"Bluetooth";
         it.label = labels[items.size()];
@@ -692,6 +703,13 @@ void SetShowDisconnectedDevices(bool on) {
     SaveShowDisconnectedDevices(on);
     for (auto& [k, e] : g_entries) ApplyEntry(e);
     UpdatePlaceholder();
+    UpdateWidget();
+}
+
+void SetDimSleeping(bool on) {
+    g_dimSleeping = on;
+    SaveDimSleeping(on);
+    for (auto& [k, e] : g_entries) ApplyEntry(e);
     UpdateWidget();
 }
 
@@ -850,6 +868,7 @@ void ShowMenu() {
     }
     AppendMenuW(m, MF_STRING | (g_hideLastKnown ? MF_CHECKED : 0), ID_HIDE_LAST_KNOWN, T(L"Hide last known / asleep devices"));
     AppendMenuW(m, MF_STRING | (g_showDisconnectedDevices ? MF_CHECKED : 0), ID_SHOW_DISCONNECTED, T(L"Show disconnected devices"));
+    AppendMenuW(m, MF_STRING | (g_dimSleeping ? MF_CHECKED : 0), ID_DIM_SLEEPING, T(L"Dim sleeping devices"));
     AppendMenuW(m, MF_STRING | (g_recordHistory ? MF_CHECKED : 0), ID_RECORD_HISTORY, T(L"Record battery history"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, T(L"Show on the taskbar (icon + percentage)"));
@@ -936,6 +955,7 @@ void ShowMenu() {
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
         case ID_SHOW_DISCONNECTED: SetShowDisconnectedDevices(!g_showDisconnectedDevices); break;
+        case ID_DIM_SLEEPING: SetDimSleeping(!g_dimSleeping); break;
         case ID_RECORD_HISTORY: g_recordHistory = !g_recordHistory; SaveRecordHistory(g_recordHistory); break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MONITOR_ALL: SetWidgetMonitor(L"all"); break;
@@ -1265,6 +1285,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_wantWidget = LoadWidgetMode();
     g_hideLastKnown = LoadHideLastKnown();
     g_showDisconnectedDevices = LoadShowDisconnectedDevices();
+    g_dimSleeping = LoadDimSleeping();
     g_recordHistory = LoadRecordHistory();
     g_widgetBackground = LoadWidgetBackground();
     g_brandColors = LoadBrandColors();

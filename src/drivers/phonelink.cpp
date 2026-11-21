@@ -1,15 +1,11 @@
-// Phones linked with Microsoft Phone Link (formerly "Your Phone"), over Wi-Fi or Bluetooth.
-// Phone Link keeps the Windows 11 Start menu companion card up to date in its package folder:
-//   %LOCALAPPDATA%\Packages\Microsoft.YourPhone_8wekyb3d8bbwe\LocalState\StartMenu\StartMenuCompanion.json
-// It is an Adaptive Card whose "speak" field reads "<phone name> - Connected to your PC" and
-// whose battery element carries the tooltip "Battery <n>% remaining" (", charging" appended while
-// the phone charges). Only those two fields are read; the rest of the card (notification
-// previews) is ignored.
-// The file is an undocumented Phone Link implementation detail, so the parse is strict: anything
-// unexpected means no phone is reported. Read-only, no device or network access.
+// Microsoft Phone Link stores a localized Adaptive Card in its package folder.
+// The card contains the phone connection status and battery information.
+// Supports English and Japanese connection messages and battery tooltips.
+// Reads localized fields from the JSON card layout; rejects malformed or ambiguous readings.
+// The file is an undocumented Phone Link implementation detail.
+// Read-only, no device or network access.
 #include "drivers.h"
-
-#include <cwctype>
+#include "phonelink_protocol.h"
 
 namespace {
 
@@ -36,44 +32,6 @@ bool ReadUtf8File(const std::wstring& path, std::wstring& out, FILETIME& written
     MultiByteToWideChar(CP_UTF8, 0, bytes.data(), (int)bytes.size(), out.data(), n);
     return true;
 }
-
-// Value of the first JSON string field `"key":"..."` (simple escapes only).
-bool JsonString(const std::wstring& json, const wchar_t* key, std::wstring& value) {
-    std::wstring pat = L"\"" + std::wstring(key) + L"\":\"";
-    size_t i = json.find(pat);
-    if (i == std::wstring::npos) return false;
-    value.clear();
-    for (i += pat.size(); i < json.size() && json[i] != L'"'; i++) {
-        if (json[i] == L'\\' && i + 1 < json.size()) {
-            wchar_t e = json[++i];
-            if (e == L'u' && i + 4 < json.size()) {
-                value += (wchar_t)wcstoul(json.substr(i + 1, 4).c_str(), nullptr, 16);
-                i += 4;
-            } else {
-                value += (e == L'n' || e == L't') ? L' ' : e;
-            }
-        } else {
-            value += json[i];
-        }
-    }
-    return i < json.size();
-}
-
-// <n> from the first "Battery <n>% remaining"; `charging` is set when it goes on ", charging".
-int BatteryPercent(const std::wstring& json, bool& charging) {
-    const std::wstring pat = L"Battery ";
-    for (size_t i = json.find(pat); i != std::wstring::npos; i = json.find(pat, i + 1)) {
-        size_t j = i + pat.size(), k = j;
-        while (k < json.size() && iswdigit(json[k]) && k - j < 3) k++;
-        if (k > j && json.compare(k, 11, L"% remaining") == 0) {
-            int v = _wtoi(json.substr(j, k - j).c_str());
-            charging = json.compare(k + 11, 10, L", charging") == 0;
-            if (v >= 0 && v <= 100) return v;
-        }
-    }
-    return -1;
-}
-
 }  // namespace
 
 void PollPhoneLink(PollContext& ctx) {
@@ -82,15 +40,15 @@ void PollPhoneLink(PollContext& ctx) {
     if (!n || n >= MAX_PATH) return;
     std::wstring path = std::wstring(base) + L"\\Packages\\Microsoft.YourPhone_8wekyb3d8bbwe\\LocalState\\StartMenu\\StartMenuCompanion.json";
 
-    std::wstring json, speak;
+    std::wstring json;
     FILETIME written{};
-    if (!ReadUtf8File(path, json, written) || !JsonString(json, L"speak", speak)) return;
-    // "Nothing Phone (4a) Pro - Connected to your PC"; anything else (disconnected, setup cards) is skipped.
-    const std::wstring suffix = L" - Connected to your PC";
-    if (speak.size() <= suffix.size() || speak.compare(speak.size() - suffix.size(), suffix.size(), suffix) != 0) return;
-    bool charging = false;
-    int pct = BatteryPercent(json, charging);
-    if (pct < 0) return;
+
+    if (!ReadUtf8File(path, json, written))
+        return;
+
+    PhoneLink::Reading reading;
+    if (!PhoneLink::Parse(json, reading))
+        return;
 
     FILETIME now{};
     GetSystemTimeAsFileTime(&now);
@@ -101,11 +59,12 @@ void PollPhoneLink(PollContext& ctx) {
 
     DeviceStatus s;
     s.key = L"phonelink";
-    s.name = speak.substr(0, speak.size() - suffix.size());
+    s.name = reading.name;
     s.via = L"Phone Link";
     s.kind = DeviceKind::Phone;
-    s.percent = pct;
-    s.charging = charging;
+    s.percent = reading.percent;
+    s.charging = reading.charging;
     s.asleep = ageSec > kStaleSec;
+
     ctx.out.push_back(s);
 }
