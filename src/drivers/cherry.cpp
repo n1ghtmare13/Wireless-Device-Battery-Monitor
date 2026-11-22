@@ -110,7 +110,9 @@ void PollCherry(PollContext& ctx) {
 }
 
 // ---------------------------------------------------------------------------
-// Cherry XTRFY 1K Mouse Receiver (046A:0330) and the mouse paired to it.
+// Cherry XTRFY 1K Mouse Receiver (046A:0330) and the mouse paired to it, plus the mouse
+// itself in wired USB-C mode (046A:0332), which speaks the same CompX protocol on its own
+// FF02:0002 collection with the charging flag set (no link-status command needed there).
 //
 // The receiver exposes a 17-byte vendor channel on usage page FF02, usage 0002 (in 17 / out 17).
 // It speaks the shared CompX framing also used by the Corsair Sabre V2 Pro (1B1C:2B2A, corsair.cpp)
@@ -124,7 +126,8 @@ void PollCherry(PollContext& ctx) {
 //   08 04 00 00 00 02 5f 00 0f f4 00 00 00 00 00 00 e5
 namespace {
 
-constexpr USHORT kXtrfyPid = 0x0330;
+constexpr USHORT kXtrfyPid = 0x0330;       // 2.4 GHz 1K receiver
+constexpr USHORT kXtrfyWiredPid = 0x0332;  // mouse in wired USB-C mode
 constexpr size_t kXtrfyLen = 17;
 constexpr BYTE kXtrfyReportId = 0x08;
 constexpr BYTE kXtrfyLink = 0x03;
@@ -168,37 +171,44 @@ bool XtrfyExchange(HidDev& d, BYTE cmd, std::vector<BYTE>& r) {
 }  // namespace
 
 static void PollCherryXtrfy(PollContext& ctx) {
-    if (ctx.IsClaimed(kVid, kXtrfyPid)) return;
-    for (const HidColl* c : ctx.Find(kVid, kXtrfyPid, [](const HidColl& c) {
-             return c.page() == 0xFF02 && c.usage() == 0x0002 && c.inLen() == kXtrfyLen && c.outLen() == kXtrfyLen;
-         })) {
-        HidDev d;
-        if (!d.Open(*c)) return;
-        DeviceStatus s;
-        std::vector<BYTE> r;
-        bool answered = false;
-        // Check whether the mouse is switched on and linked before asking it for power.
-        if (XtrfyExchange(d, kXtrfyLink, r)) {
-            answered = true;
-            s.connected = r[6] != 0;
+    const USHORT pids[] = {kXtrfyPid, kXtrfyWiredPid};
+    for (USHORT pid : pids) {
+        if (ctx.IsClaimed(kVid, pid)) continue;
+        for (const HidColl* c : ctx.Find(kVid, pid, [](const HidColl& c) {
+                 return c.page() == 0xFF02 && c.usage() == 0x0002 && c.inLen() == kXtrfyLen && c.outLen() == kXtrfyLen;
+             })) {
+            HidDev d;
+            if (!d.Open(*c)) return;
+            DeviceStatus s;
+            std::vector<BYTE> r;
+            bool answered = false;
+            const bool wired = (pid == kXtrfyWiredPid);
+            // Dongle: check whether the mouse is switched on and linked before asking for power.
+            // Wired USB-C: no link concept; the mouse answers GetPower directly, charging flag set.
+            if (!wired && XtrfyExchange(d, kXtrfyLink, r)) {
+                answered = true;
+                s.connected = r[6] != 0;
+            }
+            if (wired || !answered || s.connected) {
+                if (XtrfyExchange(d, kXtrfyPower, r)) {
+                    answered = true;
+                    s.connected = true;
+                    if (r[6] <= 100) s.percent = r[6];
+                    s.charging = r[7] != 0;
+                    s.millivolts = (r[8] << 8) | r[9];
+                }
+            } else if (answered && s.connected) {
+                s.asleep = true;  // linked, but no usable power reply
+            }
+            if (!answered) return;  // silent: mouse switched off or asleep; the last value is kept
+            if (!s.connected) { ctx.Claim(kVid, pid); return; }
+            s.key = L"cherry:xtrfy";
+            s.name = L"Cherry XTRFY wireless mouse";
+            s.kind = DeviceKind::Mouse;
+            s.via = wired ? L"USB cable" : L"2.4 GHz receiver";
+            s.graceSec = 1800;  // existing UI keeps the last reading, dimmed, while the mouse sleeps
+            ctx.Add(s, kVid, pid);
+            return;
         }
-        if ((!answered || s.connected) && XtrfyExchange(d, kXtrfyPower, r)) {
-            answered = true;
-            s.connected = true;
-            if (r[6] <= 100) s.percent = r[6];
-            s.charging = r[7] != 0;
-            s.millivolts = (r[8] << 8) | r[9];
-        } else if (answered && s.connected) {
-            s.asleep = true;  // linked, but no usable power reply
-        }
-        if (!answered) return;  // silent: mouse switched off or asleep; the last value is kept
-        if (!s.connected) { ctx.Claim(kVid, kXtrfyPid); return; }
-        s.key = L"cherry:xtrfy";
-        s.name = L"Cherry XTRFY wireless mouse";
-        s.kind = DeviceKind::Mouse;
-        s.via = L"2.4 GHz receiver";
-        s.graceSec = 1800;  // existing UI keeps the last reading, dimmed, while the mouse sleeps
-        ctx.Add(s, kVid, kXtrfyPid);
-        return;
     }
 }
