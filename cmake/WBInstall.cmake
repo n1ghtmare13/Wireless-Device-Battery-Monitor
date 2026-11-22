@@ -26,6 +26,6 @@ install(FILES "${PROJECT_SOURCE_DIR}/LICENSE"
     RENAME "copyright"
     COMPONENT Runtime)
 
-install(FILES "${PROJECT_SOURCE_DIR}/linux/99-wireless-battery.rules"
+install(FILES "${PROJECT_SOURCE_DIR}/linux/70-wireless-battery.rules"
     DESTINATION "${WB_UDEV_DIR}"
     COMPONENT Udev)
