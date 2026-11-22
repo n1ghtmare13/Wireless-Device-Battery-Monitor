@@ -34,6 +34,7 @@ const Model kModels[] = {
     { 0x1A85, L"ROG Azoth", KB, 2, 2, L"col02", 6, 1 },
     { 0x1A85, L"ROG Azoth", KB, 0, 1, nullptr, 6, 1 },
     { 0x1A83, L"ROG Azoth", KB, 0, 1, nullptr, 6, 1 },
+    { 0x1C10, L"ROG Azoth 96 HE", KB, 0, 1, nullptr, 6, 1 },
     { 0x1B42, L"ROG Azoth Extreme", KB, 2, 2, L"col02", 6, 1 },
     { 0x1B3F, L"ROG Azoth Extreme", KB, 0, 1, nullptr, 6, 1 },
     { 0x1CF1, L"ROG Azoth Extreme SE", KB, 2, 2, L"col02", 6, 1 },
@@ -176,6 +177,48 @@ void PollOmni(PollContext& ctx, std::vector<std::wstring>& seen) {
     }
 }
 
+// ROG Azoth 96 HE (0B05:1C10) on the SpeedNova 8K receiver (0B05:1AD0). The receiver's own pid is
+// the Harpe II Ace mouse channel, so the keyboard is read here without claiming that pid. Keyboard
+// query [02][12][01] on the col02 collection: [6] battery %, [9] == 1 charging. An FF AA answer means
+// the keyboard is asleep, but the receiver gives the same answer when nothing is paired, so asleep is
+// only shown once the keyboard has answered awake in this session (same rule as the receiver's mice).
+void PollAzothDongle(PollContext& ctx, std::vector<std::wstring>& seen) {
+    static bool awake = false;
+    auto colls = ctx.Find(0x0B05, 0x1AD0, [](const HidColl& c) {
+        return c.iface == 2 && c.outLen() >= 12 && PathHas(c.path, L"col02");
+    });
+    // Several col02 instances exist; one of them can answer asleep while another answers with the
+    // battery, so a real answer wins over any asleep answer.
+    bool sawAsleep = false;
+    for (const HidColl* c : colls) {
+        HidDev d;
+        std::vector<BYTE> r;
+        if (!d.Open(*c)) continue;
+        Reply res = Query(d, 0x02, 0x12, 0x01, r);
+        if (res == Reply::Asleep) sawAsleep = true;
+        if (res != Reply::Ok) continue;
+        awake = true;
+        DeviceStatus s;
+        s.key = L"rog:1C10:kb";
+        s.name = L"ROG Azoth 96 HE";
+        s.kind = DeviceKind::Keyboard;
+        s.via = L"2.4 GHz receiver";
+        if (r[6] <= 100) s.percent = r[6];
+        s.charging = r[9] == 1;
+        AddOnce(ctx, seen, s);
+        return;
+    }
+    if (sawAsleep && awake) {
+        DeviceStatus s;
+        s.key = L"rog:1C10:kb";
+        s.name = L"ROG Azoth 96 HE";
+        s.kind = DeviceKind::Keyboard;
+        s.via = L"2.4 GHz receiver";
+        s.asleep = true;
+        AddOnce(ctx, seen, s);
+    }
+}
+
 // ROG Pelta (0B05:1B84) and ROG Delta II (0B05:1AFA) headsets. Vendor collection FF00:0001 on
 // interface 3, report id CC, 64 bytes each way.
 //   CC 12 07 -> CC 12 07 00 00 [5] sleep min [6] battery % (FE = unknown) [7] low-battery alert %
@@ -303,6 +346,7 @@ void PollRog(PollContext& ctx) {
     PollPelta(ctx);
     PollCetraOpen(ctx);
     PollOmni(ctx, seen);
+    PollAzothDongle(ctx, seen);
     for (const Model& m : kModels) {
         if (ctx.IsClaimed(0x0B05, m.pid)) continue;
         auto colls = ctx.Find(0x0B05, m.pid, [&](const HidColl& c) {

@@ -1,9 +1,12 @@
-// HyperX wireless headsets and Pulsefire Haste 2 mice (HP VID 03F0, older Kingston VID 0951).
+// HyperX wireless headsets and Pulsefire Haste 2 / Dart mice (HP VID 03F0, older Kingston VID 0951).
 // Protocols: Pulsefire Haste 2 Core Wireless (03F0:0AB5), Haste 2 Wireless (03F0:0F98) and Haste 2 Mini (03F0:0DA0)
 // verified on hardware, see HasteWireless;
 // Cloud III Wireless verified on hardware (03F0:0C9D) and github.com/Medprj/HyperXWM;
 // Cloud III S from github.com/LennardKittner/HyperHeadset; Cloud Stinger Core from
 // github.com/davidsantanaalves/HyperBatteryMonitor (also Cloud Core Wireless DTS 0951:173F, verified on hardware);
+// Pulsefire Dart (0951:16E1, read on hardware) follows the reverse-engineering notes in
+// github.com/santeri3700/hyperx_pulsefire_dart_reverse_engineering (CC0), also implemented in
+// github.com/radoslavchobanov/PlasmaNGenuity (MIT), see PulsefireDart;
 // the others follow github.com/Sapd/HeadsetControl.
 #include "drivers.h"
 
@@ -115,6 +118,31 @@ bool CloudAlpha2(const HidColl& c, DeviceStatus& s) {
     return true;
 }
 
+// Original Pulsefire Haste Wireless (not Haste 2): NGENUITY2 64-byte vendor output/input reports.
+// Source: github.com/OpenMouse-Project/mouse-protocol (src/hyperx/index.ts and src/drivers/hyperx/hid.ts),
+// building on github.com/evan-razzaque/open-pulsefire-haste. Only the GET_BATTERY (0x51) opcode is sent.
+// HID buffers include the unnumbered report ID 0; the payload starts with 0x51, reply echoes it.
+// 03F0:028E = 2.4 GHz receiver, 03F0:048E = cable / wired mode.
+bool HasteOriginal(const HidColl& c, DeviceStatus& s) {
+    HidDev d;
+    if (!d.Open(c)) return false;
+    std::vector<BYTE> r;
+    if (!Query(d, { 0x00, 0x51 }, r, 800, [](const std::vector<BYTE>& r) {
+            return r.size() >= 6 && r[0] == 0x51;
+        })) return false;
+
+    s = Base(c.pid, L"HyperX Pulsefire Haste Wireless");
+    s.kind = DeviceKind::Mouse;
+    s.via = c.pid == 0x028E ? L"2.4 GHz receiver" : L"USB cable";
+    // 0 and FF mean unavailable on this protocol, notably in wired mode.
+    if (r[4] >= 1 && r[4] <= 100) {
+        s.percent = r[4];
+        s.charging = r[5] == 0x01 || r[5] == 0x02;
+        s.full = r[5] == 0x02;
+    }
+    return true;
+}
+
 // Pulsefire Haste 2 (Core) Wireless: NGENUITY's read-only battery query, the same 52 01 / 50 02 pair as
 // Cloud Alpha 2, on the dongle's vendor collection (interface 2). 64-byte reports.
 // From github.com/PMarinov1994/ngenuity-linux-cli (Haste 2 Wireless). Verified on a Core Wireless (03F0:0AB5), on
@@ -157,6 +185,34 @@ bool HasteWireless(const HidColl& c, DeviceStatus& s) {
         s.charging = r[3] == 0x01 || r[3] == 0x02;
         s.millivolts = r[6] | (r[7] << 8);
     }
+    return true;
+}
+
+// Pulsefire Dart (Kingston dongle 0951:16E1, vendor collection FF00 on interface 2): the "heartbeat"
+// query, a 64-byte zero-padded output report whose first byte is the command 0x51 (sent here with report ID 0).
+// The documented reply is the input report 51 00 00 03 <battery 0..100 %> <1 = charging> ...; bytes [6..10] are
+// undocumented, so no voltage is reported. The dongle can also answer 51 00 02 EC 05 00 ...: on a real 16E1 dongle
+// (2026-11-21) it did so in stretches of half a minute to minutes while NGENUITY showed 69%, trigger unknown. That
+// 05 is not a level (reading it as one showed 5%), so only the 00 00 03 layout gives a level; any other heartbeat
+// reply lists the mouse as asleep with an unknown level, and the tray keeps the last reading.
+// Source: community reverse engineering from NGENUITY captures (see the credits at the top of the file). Read on a
+// real 16E1 dongle on Windows: the collection is MI_02 FF00:0001 with 65-byte input/output/feature reports, and
+// the documented reply gave 69%, the level NGENUITY showed at the same time; charging not yet observed. The cable
+// variant (0951:16E2, FF13) is not handled. Protocol notes: docs/hyperx_pulsefire_dart.md.
+bool PulsefireDart(const HidColl& c, DeviceStatus& s) {
+    HidDev d;
+    if (!d.Open(c)) return false;
+    std::vector<BYTE> r;
+    auto heartbeat = [](const std::vector<BYTE>& r) { return r.size() >= 6 && r[0] == 0x51; };
+    if (!Query(d, { 0x00, 0x51 }, r, 1000, heartbeat)) return false;
+    s = Base(c.pid, L"HyperX Pulsefire Dart");
+    s.kind = DeviceKind::Mouse;
+    if (r[1] != 0x00 || r[2] != 0x00 || r[3] != 0x03 || r[4] > 100) {
+        s.asleep = true;  // answered without a level (e.g. 51 00 02 EC 05): keep the last reading
+        return true;
+    }
+    s.percent = r[4];
+    s.charging = r[5] == 0x01;
     return true;
 }
 
@@ -207,16 +263,14 @@ bool Cloud3S(const HidColl& c, DeviceStatus& s) {
 // From github.com/davidsantanaalves/HyperBatteryMonitor (Devices/CloudStingerCoreWirelessDevice.cs, MIT);
 // the PlayStation receiver 03F0:0A93 was verified on hardware there (PR #6: 52 queries, codes 03/05/06).
 // SetFeature(command), wait 20 ms, GetFeature(FF):
-//   connection: reply [11] == 1 means the headset is on.
-//   battery:    reply [9] = 03 discharging / 05 charging / 06 full, [11..12] = battery mV (little endian).
-// The PlayStation receivers (03F0:0A93, 0951:1713) and DTS receiver (03F0:0A8E) can hand back a previous report;
-// their battery reply is FF 12 05, so on them the reply is read again (up to 10 x 20 ms) until it looks right.
-// 0951:1713 (Kingston PlayStation receiver, same MI_03 layout as 0A93) was verified on hardware.
-// 0951:173F (Kingston receiver of the Cloud Core Wireless DTS, same MI_03 layout) was verified on hardware:
-// connection reply [11] == 1 when the headset is on, 3 when it is off; battery reply FF 12 05 with [9] == 03
-// while discharging and 05 while charging. The mV-to-percent curve is the Stinger Core one, not calibrated for
-// this model.
-// DTS 03F0:0A8E: battery/charging verified on Windows; same FF 12 05 reply (HyperBatteryMonitor PR #16).
+//   connection: reply [11] == 1 means the headset is on (3 when off; header FF 0C 05 on 0951:170B).
+//   battery:    reply FF 12 05, [9] = 03 discharging / 05 charging / 06 full, [11..12] = battery mV (LE).
+// All five receivers (03F0:0A93, 03F0:0A8E, 0951:170B, 0951:1713, 0951:173F) can return a stale previous
+// report with header FF 01 00 at 20 ms before the fresh reply arrives (observed at 40 ms on 0951:170B,
+// where reading the stale connection reply as battery produced 0x0E01 = 3585 mV / 5% or dropped the reading).
+// Replies are therefore polled up to 10 x 20 ms until a fresh connection or FF 12 05 battery frame arrives.
+// Hardware verified: 0951:170B (discharging, charging, off), 0951:1713, 0951:173F (Cloud Core Wireless DTS,
+// using the Stinger Core mV curve), and 03F0:0A8E (HyperBatteryMonitor PR #16).
 bool StingerCore(const HidColl& c, DeviceStatus& s) {
     static const std::vector<BYTE> kConnection = { 0xFF, 0x07, 0x00, 0xFD, 0x04, 0x00, 0x00, 0x02, 0x82, 0x03,
                                                    0x05, 0x29, 0x0F, 0x00, 0x00, 0x03, 0x68, 0x10, 0x00, 0x00 };
@@ -228,22 +282,23 @@ bool StingerCore(const HidColl& c, DeviceStatus& s) {
 
     HidDev d;
     if (!d.Open(c)) return false;
-    const bool ps = c.pid == 0x0A93 || c.pid == 0x1713 || c.pid == 0x173F || c.pid == 0x0A8E;
     auto exchange = [&](const std::vector<BYTE>& cmd, std::vector<BYTE>& r, bool (*good)(const std::vector<BYTE>&)) {
         if (!d.SetFeature(cmd)) return false;
-        for (int i = 0; i < (ps ? 10 : 1); i++) {
+        for (int i = 0; i < 10; i++) {
             Sleep(20);
             if (!d.GetFeature(0xFF, r) || r.size() < 13) return false;
-            if (!ps || good(r)) return true;
+            if (good(r)) return true;
         }
         return false;
     };
-    auto fresh = [](const std::vector<BYTE>& r) { return !(r[1] == 0x01 && r[2] == 0x00); };
+    auto fresh = [](const std::vector<BYTE>& r) {
+        return !(r[1] == 0x01 && r[2] == 0x00) && !(r[1] == 0x12 && r[2] == 0x05);
+    };
     auto battery = [](const std::vector<BYTE>& r) { return r[0] == 0xFF && r[1] == 0x12 && r[2] == 0x05; };
 
     std::vector<BYTE> r;
-    // The connection reply's header isn't documented, so after 10 stale-looking reads the last one is used.
-    if (!exchange(kConnection, r, fresh) && !(ps && r.size() >= 13 && !fresh(r))) return false;
+    // Some receivers/fixtures only expose FF 01 00 on connection reads, so keep the last one after 10 retries.
+    if (!exchange(kConnection, r, fresh) && !(r.size() >= 13 && r[1] == 0x01 && r[2] == 0x00)) return false;
     s = Base(c.pid, c.pid == 0x173F ? L"HyperX Cloud Core Wireless"
                   : c.pid == 0x0A8E ? L"HyperX Cloud Stinger Core Wireless DTS"
                   : L"HyperX Cloud Stinger Core Wireless");
@@ -265,7 +320,7 @@ struct Model {
 };
 
 const Model kModels[] = {
-    { 0x03F0, { 0x05B7, 0x0C9D }, [](const HidColl& c) { return c.outLen() == 62 && c.inLen() == 62; }, Cloud3 },
+    { 0x03F0, { 0x0FCC, 0x05B7, 0x0C9D }, [](const HidColl& c) { return c.outLen() == 62 && c.inLen() == 62; }, Cloud3 },
     // Cloud II Core Wireless: same 66 <cmd> protocol as Cloud III Wireless, 64-byte reports (HyperHeadset).
     { 0x03F0, { 0x069F, 0x0995 }, [](const HidColl& c) { return c.page() >= 0xFF00 && c.outLen() >= 62 && c.inLen() >= 62; }, Cloud3 },
     // Cloud III S: report 0C lives on the 64/64-byte collection, which Windows lists under usage page 01C0
@@ -281,9 +336,17 @@ const Model kModels[] = {
     }, Cloud2Kingston },
     { 0x03F0, { 0x098D }, [](const HidColl& c) { return c.page() >= 0xFF00 && c.outLen() >= 3; }, CloudAlpha },
     { 0x03F0, { 0x08BE }, [](const HidColl& c) { return c.page() == 0xFF13 && c.usage() == 0xFF00; }, CloudAlpha2 },
+    // Original Pulsefire Haste Wireless, both 2.4 GHz dongle and USB cable: 64-byte unnumbered vendor reports.
+    { 0x03F0, { 0x028E, 0x048E }, [](const HidColl& c) {
+        return c.page() == 0xFF00 && c.usage() == 0x0001 && c.inLen() >= 65 && c.outLen() >= 65;
+    }, HasteOriginal },
     // Pulsefire Haste 2 Wireless (0F98 tested, 0D97 untested), Haste 2 Core Wireless (0AB5 tested) and Haste 2 Mini
     // (0DA0 tested) dongles.
     { 0x03F0, { 0x0AB5, 0x0D97, 0x0F98, 0x0DA0 }, [](const HidColl& c) { return c.page() >= 0xFF00 && c.outLen() >= 2 && c.inLen() >= 8; }, HasteWireless },
+    // Pulsefire Dart dongle (Kingston): vendor collection FF00:0001 on MI_02, 65-byte reports on Windows.
+    { 0x0951, { 0x16E1 }, [](const HidColl& c) {
+        return c.page() == 0xFF00 && c.outLen() >= 2 && c.inLen() >= 6;
+    }, PulsefireDart },
     { 0x0951, { 0x16C4, 0x1723, 0x1749 }, [](const HidColl& c) { return c.page() >= 0xFF00 && c.outLen() >= 3; }, CloudFlight },
     { 0x03F0, { 0x0E90 }, [](const HidColl& c) { return c.page() >= 0xFF00 && c.outLen() >= 3; }, CloudFlight },  // Cloud Flight (HP)
     // Cloud Stinger Core Wireless: PlayStation receivers (HP 0A93, Kingston 1713), the HP DTS receiver (0A8E), the

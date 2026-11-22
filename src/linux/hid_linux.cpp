@@ -45,7 +45,11 @@ void FinalizeCollection(ReportInfo& r, const ReportBits& bits, bool hasIds) {
         (void)id;
         r.in = std::max(r.in, (arr[0] + 7) / 8 + (hasIds ? 1 : 0));
         r.out = std::max(r.out, (arr[1] + 7) / 8 + (hasIds ? 1 : 0));
-        r.feat = std::max(r.feat, (arr[2] + 7) / 8 + (hasIds ? 1 : 0));
+        // hidraw feature ioctls always include a report-number byte,
+        // even for unnumbered reports (report ID 0).
+        // Collections without feature data must keep featLen() == 0.
+        if (arr[2] > 0)
+            r.feat = std::max(r.feat, (arr[2] + 7) / 8 + 1);
     }
 }
 

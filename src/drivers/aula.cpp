@@ -385,7 +385,10 @@ bool QueryHeroBattery(HidDev& d, int& level, bool& charging) {
 // these frames, and every request wakes it right after it has gone to sleep (issue #191). A
 // receiver that has never answered since it was plugged in is therefore asked less and less often
 // once it has stayed silent for a while (5, 10, 20, 40 minutes, then hourly). One answer brings
-// back the normal per-poll query; unplugging the receiver starts over.
+// back the normal per-poll query; unplugging the receiver starts over. So does a keyboard on this receiver id
+// that had readings in the battery history before the app started: an AULA keyboard that was asleep or
+// switched off through the first minutes after boot was otherwise asked only every 10 to 60 minutes, and
+// stayed missing from the tray for most of an hour although it answered right away when asked.
 struct ReceiverState {
     bool answered = false;
     int misses = 0, backoffs = 0;
@@ -515,6 +518,13 @@ void PollAula(PollContext& ctx) {
         USHORT vid = kReceivers[i].vid, pid = kReceivers[i].pid;
         ReceiverState& st = states[i];
         if (ctx.Find(vid, pid, [](const HidColl&) { return true; }).empty()) st = ReceiverState();  // unplugged
+        const std::wstring baseKey = L"aula:" + Hex4(vid) + L":" + Hex4(pid);
+        if (!st.answered &&
+            (ctx.SeenBefore(baseKey) ||
+             (ctx.seenBefore &&
+              std::any_of(ctx.seenBefore->begin(), ctx.seenBefore->end(),
+                          [&](const std::wstring& k) { return k.rfind(baseKey + L":", 0) == 0; }))))
+            st.answered = true;
         if (ctx.IsClaimed(vid, pid)) continue;
         if (!st.answered && st.nextTry && GetTickCount64() < st.nextTry) continue;
         bool tried = false, answered = false;

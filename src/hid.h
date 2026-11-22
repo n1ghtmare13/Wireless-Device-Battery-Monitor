@@ -33,7 +33,7 @@ struct HIDP_CAPS {
 struct HidColl {
     std::wstring path;
     std::wstring product;  // filled by the Linux backend from sysfs; unused on Windows
-    USHORT vid = 0, pid = 0;
+    USHORT vid = 0, pid = 0, version = 0;
     int iface = -1;  // USB interface number (MI_xx in the path), -1 when unknown
     HIDP_CAPS caps{};
     USHORT page() const { return caps.UsagePage; }
@@ -62,9 +62,16 @@ public:
     bool ok() const { return fd_ >= 0; }
 #endif
     const HidColl& coll() const { return c_; }
+#ifdef _WIN32
+    bool HasInputOutputReport(BYTE reportId) const;
+#endif
 
     bool Write(const std::vector<BYTE>& data, int timeoutMs = 500);
     bool Write(std::initializer_list<BYTE> data, int timeoutMs = 500) { return Write(std::vector<BYTE>(data), timeoutMs); }
+    // Writes a request and waits for an input response. Windows arms the input read before writing;
+    // writeSucceeded distinguishes a failed write from a request that received no response.
+    int WriteAndRead(const std::vector<BYTE>& data, std::vector<BYTE>& buf, int timeoutMs,
+                     bool* writeSucceeded = nullptr);
     // Reads one input report into `buf` (resized to fit). Returns the byte count, or -1 on timeout/error.
     int Read(std::vector<BYTE>& buf, int timeoutMs);
     // Reads input reports until `match(buf)` accepts one (true) or `timeoutMs` runs out (false).

@@ -6,6 +6,8 @@ Keychron Link receiver and over the USB cable, and BatteryHub shows its level, v
 
 Tested on the **Keychron K5 Max ANSI RGB** (`3434:0A50`) with the Keychron Link receiver (`3434:D030`).
 
+The **Q6 Ultra 8K** runs different (ZMK-based) firmware and has its own page: [q6_ultra_8k.md](q6_ultra_8k.md).
+
 ## What the patch changes
 
 Based on [Keychron/qmk_firmware](https://github.com/Keychron/qmk_firmware) branch `2025q3` (commit `57e682c`):

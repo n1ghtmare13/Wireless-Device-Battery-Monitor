@@ -20,6 +20,6 @@ The listener needs two agreeing decoded battery tiers, rather than two
 identical whole reports. The last confirmed value is kept for up to
 45 seconds. The global auto-refresh interval changes to 15 seconds.
 
-Validated by end user on Windows with ARDOR Fury V2 and Logitech G733:
+Validated by the end user on Windows with ARDOR Fury V2 and Logitech G733:
 50% and 75% captures, periodic automatic update, 25%/100% visual checks,
 and portable startup. The reports for 25% and 100% were not captured.

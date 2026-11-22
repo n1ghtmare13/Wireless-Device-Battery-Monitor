@@ -29,7 +29,7 @@ int main() {
     assert(infos[0].usagePage == 0x01 && infos[0].usage == 0x02);
     assert(infos[0].in == 2 && infos[0].feat == 0);
     assert(infos[1].usagePage == 0xFF00 && infos[1].usage == 0x01);
-    assert(infos[1].feat == 7 && infos[1].in == 0);
+    assert(infos[1].feat == 8 && infos[1].in == 0);
 
     // Report IDs add one prefix byte to every report length.
     const unsigned char numbered[] = {
@@ -41,6 +41,42 @@ int main() {
     auto numberedInfos = ParseReportDescriptor(numbered, sizeof(numbered));
     assert(numberedInfos.size() == 1);
     assert(numberedInfos[0].feat == 33);
+
+    // Unnumbered 64-byte feature payload must include report ID 0.
+    const unsigned char unnumberedFeature[] = {
+        0x06, 0x00, 0xFF,
+        0x09, 0x01,
+        0xA1, 0x01,
+        0x75, 0x08,
+        0x95, 0x40,
+        0xB1, 0x02,
+        0xC0,
+    };
+
+    auto unnumberedInfos =
+        ParseReportDescriptor(unnumberedFeature, sizeof(unnumberedFeature));
+
+    assert(unnumberedInfos.size() == 1);
+    assert(unnumberedInfos[0].feat == 65);
+
+    // Numbered input-only collections must have no feature report.
+    const unsigned char numberedInputOnly[] = {
+        0x05, 0x01,
+        0x09, 0x02,
+        0xA1, 0x01,
+        0x85, 0x02,
+        0x75, 0x08,
+        0x95, 0x08,
+        0x81, 0x02,
+        0xC0,
+    };
+
+    auto inputOnlyInfos =
+        ParseReportDescriptor(numberedInputOnly, sizeof(numberedInputOnly));
+
+    assert(inputOnlyInfos.size() == 1);
+    assert(inputOnlyInfos[0].in == 9);
+    assert(inputOnlyInfos[0].feat == 0);
 
     printf("linux HID report descriptor tests passed\n");
     return 0;

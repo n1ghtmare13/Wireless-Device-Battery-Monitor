@@ -140,9 +140,29 @@ DeviceKind KindFromCategory(const std::wstring& c) {
 //    krisgfx9/Wireless-Device-Battery-Monitor#168. Its USB ids are 3151:4011 / 4015 (OpenRGB issue 4074).
 //  * 19F5:324A NuPhy WH80 over Bluetooth, hardware-tested. Its two keyboard collections
 //    coexist with a mouse collection; USB cable mode uses 19F5:A011 instead.
+//  * 0C45:FEFE AJAZZ V83 Pro over Bluetooth (issue #3993). The BT HID link exposes a boot keyboard
+//    collection next to a 6-byte mouse collection, and the model reuses the 2.4 GHz dongle's ids, so
+//    KindFromCollections sees the mouse collection and the keyboard is drawn as a mouse.
+//  * 0C45:FEFE MINI60HE MAX-1 (Sonix firmware) over Bluetooth LE, from the reporter's PnP nodes:
+//    six collections, COL01/COL05 keyboard, COL03 mouse, COL02 system control, COL04 consumer,
+//    COL06 vendor-defined. USB cable mode uses 0C45:80A1 instead.
 DeviceKind KindFromBleIds(USHORT vid, USHORT pid) {
     if (vid == 0x3151 && pid == 0x4013) return DeviceKind::Keyboard;
     if (vid == 0x19F5 && pid == 0x324A) return DeviceKind::Keyboard;
+    if (vid == 0x0C45 && pid == 0xFEFE) return DeviceKind::Keyboard;  // both models above
+    return DeviceKind::Other;
+}
+
+// Same trap as above, but keyed off the collection layout instead of a fixed vid/pid list: a keyboard
+// with a knob or macro keys exposes one extra mouse collection, and KindFromCollections sees the
+// mouse first. A real mouse that emulates a few keyboard keys still has a single keyboard collection,
+// so two or more keyboard collections (usage page 0x01 / usage 0x06) mean this is a keyboard.
+DeviceKind KindFromDuplicateKeyboardCollections(const std::vector<HidColl>& all, USHORT vid, USHORT pid) {
+    int keyboards = 0;
+    for (const auto& c : all) {
+        if (c.vid != vid || c.pid != pid || c.page() != 0x01) continue;
+        if (c.usage() == 0x06 && ++keyboards >= 2) return DeviceKind::Keyboard;
+    }
     return DeviceKind::Other;
 }
 
@@ -176,9 +196,9 @@ std::wstring ContainerOf(const std::wstring& path) {
     SetupDiDestroyDeviceInfoList(di);
     return result;
 }
-std::wstring HidContainer(const std::wstring& path) { return ContainerOf(path); }
-
 }  // namespace
+
+std::wstring HidContainer(const std::wstring& path) { return ContainerOf(path); }
 
 void PollGenericHid(PollContext& ctx) {
     // Drawing tablets and pen displays (any collection on the Digitizers page 0D) are never read:
@@ -340,6 +360,11 @@ void PollBluetooth(PollContext& ctx) {
         if (ids != hidIds.end()) s.vid = ids->second.first;
         if (s.kind == DeviceKind::Other && ids != hidIds.end()) s.kind = KindFromBleIds(ids->second.first, ids->second.second);
         if (s.kind == DeviceKind::Other && ids != hidIds.end()) s.kind = KindFromCollections(ctx.colls, ids->second.first, ids->second.second);
+        if (s.kind == DeviceKind::Mouse && ids != hidIds.end()) {
+            // A mouse collection next to two keyboard collections is a keyboard, not a mouse.
+            DeviceKind strong = KindFromDuplicateKeyboardCollections(ctx.colls, ids->second.first, ids->second.second);
+            if (strong != DeviceKind::Other) s.kind = strong;
+        }
         if (s.kind == DeviceKind::Other) s.kind = GuessKind(s.name);
         auto addr = containerAddr.find(cid);
         if (s.kind == DeviceKind::Headset && addr != containerAddr.end()) {
@@ -358,6 +383,15 @@ void PollBluetooth(PollContext& ctx) {
             }
             waited |= justStarted;
             if (got) ApplyFastPair(s, b);
+        }
+        {
+            // Marshall Major IV announces itself as "MAJOR IV" (PR #3297): a proper name and a headset icon.
+            std::wstring n = s.name;
+            for (auto& ch : n) ch = (wchar_t)towlower(ch);
+            if (n == L"major iv" || n == L"marshall major iv" || n == L"major 4" || n == L"marshall major 4") {
+                s.name = L"Marshall Major IV";
+                s.kind = DeviceKind::Headset;
+            }
         }
         ctx.out.push_back(s);
         ctx.btContainers.insert(cid);

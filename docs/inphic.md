@@ -4,7 +4,7 @@ The attached device, identified by its owner as IN10 MAX, enumerates as
 `Inphic KP 8K`, `1D57:FA65`, release `0116`. Its status collection is
 interface 2, usage `000A:0000`, input length 5 (including report ID 03).
 
-Observed every approximately four seconds, without sending any request:
+Observed approximately every four seconds, without sending any request:
 
 ```text
 03 73 41 01 64
@@ -23,7 +23,7 @@ potentially mislabeling other devices sharing this receiver.
 
 Before this change the app listed the attached mouse as `Wireless mouse`.
 The Xenta transport already handled its battery frames; the change supplies
-the missing model names. A fresh `--list` may show asleep because its five-second
+the missing model names. A fresh `--list` may show it as asleep because its five-second
 initial observation can receive only one four-second report. The resident app
 retains the listener and confirms the value on a later poll.
 

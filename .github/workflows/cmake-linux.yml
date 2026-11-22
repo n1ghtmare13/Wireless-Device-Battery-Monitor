@@ -1,0 +1,63 @@
+name: cmake-linux
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+# Read-only by default: builds of pull requests cannot change the repository or releases.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned to exact commits so a moved tag cannot swap in different code.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake pkg-config libgtk-4-dev libcairo2-dev ninja-build rpm
+
+      - name: Select version and update channel
+        run: |
+          version=0.0.0
+          channel=dev
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              version="${GITHUB_REF_NAME#v}"
+              if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+                echo 'Unsupported release tag' >&2
+                exit 1
+              fi
+              if [ "$GITHUB_REPOSITORY" = "krisgfx9/Wireless-Device-Battery-Monitor" ]; then
+                channel=stable
+              fi
+              ;;
+          esac
+          echo "WB_VERSION=$version" >> "$GITHUB_ENV"
+          echo "WB_CHANNEL=$channel" >> "$GITHUB_ENV"
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DWB_BUILD_LINUX=ON -DWB_BUILD_WINDOWS=OFF -DWB_BUILD_TESTS=ON
+          -DWB_VERSION="$WB_VERSION" -DWB_CHANNEL="$WB_CHANNEL"
+          -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package (DEB, RPM, TGZ)
+        run: cpack --config build/CPackConfig.cmake -B dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wireless-battery-linux
+          path: dist/*

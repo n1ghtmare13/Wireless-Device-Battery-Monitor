@@ -72,5 +72,31 @@ int main() {
     assert(!ShouldNotify(headphones, 15, secondWarned));
     assert(warned);                        // the mouse and headphones have independent latches
 
+    // charge limit ("unplug at 80%")
+    {
+        DeviceStatus c;
+        c.key = L"logi:mouse";
+        c.charging = true;
+        bool limitWarned = false;
+        c.percent = 81;
+        assert(ShouldNotifyChargeLimit(c, 80, 78, limitWarned) && limitWarned);   // crossed while seen
+        c.percent = 83;
+        assert(!ShouldNotifyChargeLimit(c, 80, 81, limitWarned));                 // once per charge
+        c.charging = false;
+        assert(!ShouldNotifyChargeLimit(c, 80, 83, limitWarned) && !limitWarned); // unplugged: re-armed
+        c.charging = true;
+        c.percent = 90;
+        assert(!ShouldNotifyChargeLimit(c, 80, -1, limitWarned));                 // no earlier reading: silent
+        assert(!ShouldNotifyChargeLimit(c, 80, 85, limitWarned));                 // already above when seen
+        c.percent = 100;
+        assert(!ShouldNotifyChargeLimit(c, 80, 75, limitWarned));                 // straight to full
+        c.percent = 86;
+        assert(!ShouldNotifyChargeLimit(c, 0, 84, limitWarned));                  // off
+        assert(ShouldNotifyChargeLimit(c, 85, 84, limitWarned));                  // other limit
+        c.asleep = true;
+        limitWarned = false;
+        assert(!ShouldNotifyChargeLimit(c, 85, 84, limitWarned));                 // stale reading
+    }
+
     std::puts("Smart Battery Alerts policy tests passed");
 }

@@ -15,8 +15,10 @@ std::vector<DeviceStatus> PollAllDevices() {
     ctx.colls = EnumHid();
 
     // Phase 1: famous vendors, HID only.
+    PollZebronics(ctx);      // Compx 3554:FC0A before Kysona, which also scans VID 3554
     PollGlorious(ctx);       // also G-Wolves / Hitscan (defines the shared G-Wolves model table)
     PollKysona(ctx);         // also Pulsar, ATK/VXE and other popular Chinese mice
+    PollKeychron(ctx);       // Keychron mice and trackballs
     PollLogitech(ctx);       // Unifying / Bolt / Lightspeed / Bluetooth HID++
     PollRazer(ctx);
     PollSteelSeries(ctx);
@@ -25,6 +27,10 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollPlayStation(ctx);    // DualShock 4 / DualSense over USB or Bluetooth HID
     PollCoolerMaster(ctx);
     PollFinalmouse(ctx);     // UltralightX / Starlight X dongles
+    PollLamzu(ctx);          // LAMZU wireless mice
+    PollAula(ctx);           // AULA / MCHOSE wireless keyboards
+    PollNinjutso(ctx);       // Sora V2 / Ten on their 1K receivers
+    PollRapoo(ctx);          // Rapoo VT gaming mice (passive status reports)
     return ctx.out;
 }
 

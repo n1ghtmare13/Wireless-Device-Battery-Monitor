@@ -141,6 +141,33 @@ int main() {
     assert(ctx.out.size() == 1 && ctx.out[0].key == L"hyperx:0DA0" && ctx.out[0].name == L"HyperX Pulsefire Haste 2 Mini" &&
            ctx.out[0].percent == 21);
 
+    // Original Haste Wireless uses an unnumbered output report, not the Haste 2 GET (50 02).
+    // Response bytes 4/5 contain percent and charging status; only 00 51 may be sent.
+    auto original = Collection(0x028E, 0xFF00, 65, 65);
+    auto originalReply = Report(0x51, 0, { { 4, 73 }, { 5, 0 } });
+    ctx = Poll(original, { { { 0x00, 0x51 }, { kNoise1, originalReply } } });
+    assert((writes == std::vector<std::vector<BYTE>>{ { 0x00, 0x51 } }));
+    assert(ctx.out.size() == 1 && ctx.out[0].name == L"HyperX Pulsefire Haste Wireless");
+    assert(ctx.out[0].key == L"hyperx:028E" && ctx.out[0].kind == DeviceKind::Mouse);
+    assert(ctx.out[0].via == L"2.4 GHz receiver" && ctx.out[0].percent == 73 && !ctx.out[0].charging);
+    assert(ctx.IsClaimed(0x03F0, 0x028E));
+    originalReply = Report(0x51, 0, { { 4, 64 }, { 5, 1 } });
+    ctx = Poll(Collection(0x048E, 0xFF00, 65, 65), { { { 0x00, 0x51 }, { originalReply } } });
+    assert(ctx.out.size() == 1 && ctx.out[0].via == L"USB cable");
+    assert(ctx.out[0].percent == 64 && ctx.out[0].charging && !ctx.out[0].full);
+    originalReply = Report(0x51, 0, { { 4, 100 }, { 5, 2 } });
+    ctx = Poll(original, { { { 0x00, 0x51 }, { originalReply } } });
+    assert(ctx.out.size() == 1 && ctx.out[0].percent == 100 && ctx.out[0].full);
+    for (BYTE invalid : { (BYTE)0, (BYTE)0xFF }) {
+        originalReply = Report(0x51, 0, { { 4, invalid }, { 5, 1 } });
+        ctx = Poll(original, { { { 0x00, 0x51 }, { originalReply } } });
+        assert(ctx.out.size() == 1 && ctx.out[0].percent < 0 && !ctx.out[0].charging);
+    }
+    ctx = Poll(original, {});
+    assert(ctx.out.empty() && !ctx.IsClaimed(0x03F0, 0x028E));
+    ctx = Poll(Collection(0x028E, 0x0001, 65, 65), { { { 0x00, 0x51 }, { Report(0x51, 0, { { 4, 50 } }) } } });
+    assert(ctx.out.empty() && writes.empty());
+
     // No reply at all (dongle without a mouse): nothing listed, nothing claimed.
     ctx = Poll(core, {});
     assert(ctx.out.empty() && ctx.claimed.empty());
@@ -170,5 +197,5 @@ int main() {
     ctx = Poll(core, Dongle(Link(1), Battery(40)));
     assert(ctx.out.size() == 1 && ctx.out[0].connected && ctx.out[0].percent < 0);
 
-    std::puts("HyperX Haste 2 driver tests passed (level, charging, missing link reply, link down, power-on window, filtering).");
+    std::puts("HyperX Haste original and Haste 2 driver tests passed (levels, charging, link states, malformed and missing replies, strict matching).");
 }

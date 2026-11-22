@@ -20,6 +20,7 @@
 #include "devices.h"
 #include "hid.h"
 #include "i18n.h"
+#include "memory_trim.h"
 
 namespace {
 
@@ -581,7 +582,7 @@ bool LightTheme(const wchar_t* value) {
 void ApplyTheme(HWND h) {
     bool lightApps = LightTheme(L"AppsUseLightTheme"), lightTaskbar = LightTheme(L"SystemUsesLightTheme");
     using SetAttrFn = HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD);
-    if (HMODULE dwm = LoadLibraryW(L"dwmapi.dll")) {
+    if (HMODULE dwm = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
         if (auto fn = (SetAttrFn)GetProcAddress(dwm, "DwmSetWindowAttribute")) {
             BOOL dark = !lightApps;
             fn(h, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
@@ -665,6 +666,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             g_scanned = g_sending = false;
             if (g_font) { DeleteObject(g_font); g_font = nullptr; }
             if (g_quitOnClose) PostQuitMessage(0);  // opened with --report: the process ends with the window
+            else memory_trim::Soon();
             return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -700,7 +702,7 @@ void Show(HINSTANCE inst, HWND owner) {
     HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
     UINT dpiX = 96, dpiY = 96;
     using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
-    if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
+    if (HMODULE shcore = LoadLibraryExW(L"shcore.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
         if (auto fn = (GetDpiForMonitorFn)GetProcAddress(shcore, "GetDpiForMonitor")) fn(mon, 0, &dpiX, &dpiY);
     }
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;

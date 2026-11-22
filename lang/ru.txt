@@ -19,6 +19,7 @@ Move up = Переместить вверх
 Move right = Переместить вправо
 Move down = Переместить вниз
 Hide last known / asleep devices = Скрывать спящие устройства / последние известные значения
+Keep last known battery for mice = Показывать последний известный заряд мышей
 Dim sleeping devices = Затемнять спящие устройства
 Show on the taskbar (icon + percentage) = Показывать на панели задач (значок + процент)
 Show as tray icons = Показывать значками в области уведомлений

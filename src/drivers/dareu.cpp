@@ -18,9 +18,10 @@
 #include "drivers.h"
 
 
-// DAREU Togran protocol on receiver 260D:1131 and A980 Pro cable 260D:1148 (verified on hardware), read from DAREU's own driver
-// feature report 0A (65 bytes) on the consumer-control collection: [0A][slot<<4][len][class][cmd], reply echoes class/cmd
-// slot 0 class 00/A0 lists paired mice, slot n class 07/80 gives [7]=status [8]=level [9]=max, status 1 = charging
+// DAREU Togran protocol on receivers 260D:1131 and 260D:0042, A980 Pro cable 260D:1148 and EK75 Pro
+// cable 260D:0046 (verified on hardware), read from DAREU's own driver (dr.dareu.com, js/device/ohiddevice.js)
+// feature report 0A (65 bytes) on consumer-control: [0A][slot<<4][len][class][cmd], reply echoes class/cmd
+// slot 0 class 00/A0 lists paired devices, slot n class 07/80 gives [7]=status [8]=level [9]=max, status 1 = charging
 static bool TogranQuery(HidDev& dev, BYTE slot, BYTE len, BYTE cls, BYTE cmd, std::vector<BYTE>& r) {
     std::vector<BYTE> req(65, 0);
     req[0] = 0x0A;
@@ -37,25 +38,28 @@ static bool TogranQuery(HidDev& dev, BYTE slot, BYTE len, BYTE cls, BYTE cmd, st
     return false;
 }
 
-static void AddTogranBattery(PollContext& ctx, HidDev& dev, BYTE slot, USHORT pid, USHORT mousePid) {
+static void AddTogranBattery(PollContext& ctx, HidDev& dev, BYTE slot, USHORT pid, USHORT devicePid) {
     std::vector<BYTE> b;
     if (!TogranQuery(dev, slot, 4, 0x07, 0x80, b)) return;
     BYTE maxLevel = b[9] ? b[9] : 100;
     if (b[8] > maxLevel) return;
     DeviceStatus s;
-    s.key = L"dareu:260D:" + Hex4(pid) + (pid == mousePid ? L"" : L":" + Hex4(mousePid));
-    s.name = mousePid == 0x1148 ? L"DAREU A980 Pro" : L"DAREU " + Hex4(mousePid);
-    s.kind = DeviceKind::Mouse;
+    USHORT stablePid = (devicePid == 0x0046 && pid == 0x0046) ? 0x0042 : pid;
+    s.key = L"dareu:260D:" + Hex4(stablePid) + (stablePid == devicePid ? L"" : L":" + Hex4(devicePid));
+    s.name = devicePid == 0x1148   ? L"DAREU A980 Pro"
+             : devicePid == 0x0046 ? L"DAREU EK75 Pro"
+                                   : L"DAREU " + Hex4(devicePid);
+    s.kind = devicePid == 0x0046 ? DeviceKind::Keyboard : DeviceKind::Mouse;
     s.via = slot ? L"2.4 GHz receiver" : L"USB cable";
     s.percent = (int)b[8] * 100 / maxLevel;
     s.charging = b[7] == 1;
     ctx.Add(s, 0x260D, pid);
+    if (devicePid == 0x0046 && pid == 0x0046) ctx.Claim(0x260D, 0x0042);
 }
 
-// receiver 1131 lists mice by slot, the A980 Pro on its cable (1148) answers the battery query on slot 0.
-// while wired the receiver keeps the mouse listed with status 0, so it isn't shown twice
+// receivers 1131 and 0042 list paired devices by slot, cables answer on slot 0.
 static void PollDareuTogran(PollContext& ctx) {
-    for (USHORT pid : { USHORT(0x1131), USHORT(0x1148) }) {
+    for (USHORT pid : { USHORT(0x1131), USHORT(0x0046), USHORT(0x0042), USHORT(0x1148) }) {
         if (ctx.IsClaimed(0x260D, pid)) continue;
         auto colls = ctx.Find(0x260D, pid, [](const HidColl& c) {
             return c.page() == 0x000C && c.usage() == 1 && c.featLen() == 65;
@@ -63,7 +67,7 @@ static void PollDareuTogran(PollContext& ctx) {
         if (colls.size() != 1) continue;
         HidDev dev;
         if (!dev.OpenFeatureOnly(*colls[0])) continue;
-        if (pid != 0x1131) {
+        if (pid == 0x1148 || pid == 0x0046) {
             AddTogranBattery(ctx, dev, 0, pid, pid);
             continue;
         }
@@ -112,11 +116,58 @@ void PollDareuA84(PollContext& ctx) {
     }
 }
 
+// DAREU A950 Wing: USB cable 260D:1196, 2.4 GHz 8K receiver 260D:1154 (verified on hardware).
+// Compx 17-byte output report on FF02:0002; reply gives percent, charging flag and millivolts.
+void PollDareuA950Wing(PollContext& ctx) {
+    const USHORT vid = 0x260D;
+    const USHORT kCablePid = 0x1196;
+    const USHORT kReceiverPid = 0x1154;
+    // Cable comes before receiver; an answering cable claims the receiver so the mouse is listed once.
+    for (USHORT pid : { kCablePid, kReceiverPid }) {
+        if (ctx.IsClaimed(vid, pid)) continue;
+        auto colls = ctx.Find(vid, pid, [](const HidColl& c) {
+            return c.iface == 1 && c.page() == 0xFF02 && c.usage() == 2 && c.inLen() == 17 && c.outLen() == 17;
+        });
+        if (colls.size() != 1) continue;
+
+        HidDev dev;
+        if (!dev.Open(*colls[0])) continue;
+        std::vector<BYTE> req(17, 0), r;
+        req[0] = 0x08;
+        req[1] = 0x04;
+        req[16] = 0x49;
+        dev.Flush();
+        if (!dev.Write(req)) continue;
+        ULONGLONG end = GetTickCount64() + 1000;
+        for (int reports = 0; reports < 32; reports++) {
+            int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
+            if (left <= 0 || dev.Read(r, left) < 0) break;
+            if (r.size() != 17 || r[0] != 0x08 || r[1] != 0x04 || r[6] > 100) continue;
+            BYTE sum = 0;
+            for (BYTE b : r) sum += b;
+            if (sum != 0x55) continue;
+            DeviceStatus s;
+            s.key = L"dareu:260D:" + Hex4(kReceiverPid);
+            s.name = L"DAREU A950 Wing";
+            s.kind = DeviceKind::Mouse;
+            s.via = pid == kCablePid ? L"USB cable" : L"2.4 GHz receiver";
+            s.percent = r[6];
+            s.charging = r[7] != 0;
+            s.millivolts = (r[8] << 8) | r[9];
+            s.graceSec = 1800;
+            ctx.Add(s, vid, pid);
+            if (pid == kCablePid) ctx.Claim(vid, kReceiverPid);
+            break;
+        }
+    }
+}
+
 }  // namespace
 
 void PollDareu(PollContext& ctx) {
     PollDareuTogran(ctx);
     PollDareuA84(ctx);
+    PollDareuA950Wing(ctx);
     const USHORT vid = 0x260D;
     // Prefer a valid cable reading over potentially cached receiver telemetry.
     bool em901xRead = false;

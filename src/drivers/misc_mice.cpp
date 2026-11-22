@@ -15,7 +15,9 @@
 //    command 10 (device info, answered by the receiver): reply [10][00 = ok]..., [4..7] model id,
 //    [12] charging, [13] percent, [14] mouse connected (receiver), [31] = sum([4..30]).
 //    From github.com/Rockeyxx/aj179-linux (docs/PROTOCOL.md).
-//  * AJAZZ AJ-series mice on the SONiX vendor id 3151 (AJ159 PRO / APEX and siblings). The dongle
+//  * AJAZZ AJ-series mice on the SONiX vendor id 3151 (AJ159 PRO / APEX and siblings), for receivers that
+//    are not in the Rongyuan list: the Rongyuan driver runs first and reads 3151:5007 (the AJ159 APEX 8K
+//    dock) and the other receivers it knows, with the mouse model from its device id. The dongle
 //    exposes a 65-byte feature collection on usage page FFFF / usage 02. A SET_FEATURE status poll
 //    (report 0x00, opcode 0xF7, zero payload) brings the 2.4 GHz telemetry link up; ~30 ms later
 //    GET_FEATURE report 0x05 carries the charge in byte 3 (0..100). A frame with a non-zero byte 1
@@ -31,13 +33,17 @@
 //  * Incott G23 V2 / G24 on the PixArt vendor id 093A (522C = 2.4 GHz dongle, 622C = USB cable), vendor
 //    collection FF05:0001. Read-only status query: SET_FEATURE report 09 [09][89][00 x7], then
 //    GET_FEATURE report 09 until [09][89][battery][dpi/rate]...; battery bit 7 = charging, low 7 bits =
-//    percent. The same layout is pushed as input report 09, but only now and then (when the mouse
-//    idles or a setting changes), too rarely for a one-shot poll. A reply with bytes 2 and 3 both 0 is
-//    stale and skipped. On the cable the first FF05 collection rejects SET_FEATURE, so the collections
-//    are tried last to first. From github.com/OmarK6/Incott-Manager (device.go),
-//    github.com/HeHaoren/incott-mouse-app (docs/protocol.md) and github.com/FelixNg21/MouseBattery
-//    (battery byte layout, verified on a G23 V2 with the 522C dongle).
-//  * Delux M800 Pro (VID 248A, receiver 5B2F, cable 5B2E): 33-byte feature report 0x0C on usage page
+//    percent. A reply with bytes 2 and 3 both 0 is stale and skipped. On the cable the first FF05
+//    collection rejects SET_FEATURE, so the collections are tried last to first. From
+//    github.com/OmarK6/Incott-Manager (device.go), github.com/HeHaoren/incott-mouse-app (docs/protocol.md)
+//    and github.com/FelixNg21/MouseBattery (battery byte layout, verified on a G23 V2 with the 522C dongle).
+//    The mouse also pushes its status as input report 09 every few seconds while awake. That push is
+//    preferred: a read-only listener stays open between polls and nothing is sent while frames arrive.
+//    An 8K receiver (device info 8F byte 4 = 2) answers 89 from its own state, which was frozen at 58%
+//    on a first-generation G23 Pro while the mouse pushed 73%, so there only the push is used and a
+//    mouse that pushes nothing is shown asleep. See incott_protocol.h.
+//  * Delux M800 Pro and the original Ninjutso Sora, an M800 Pro based model told apart by the receiver's
+//    HID product string (VID 248A, receiver 5B2F, cable 5B2E): 33-byte feature report 0x0C on usage page
 //    FF00 / usage 01. A SET_FEATURE status query [0C][01][20][00][seq...] is answered via
 //    GET_FEATURE 0x0C: bytes [8..11] ASCII model ("M802"), [15] sensor, [18] percent, [19] state
 //    (0 = discharging, 1 = charging, 2 = full). The dongle requires incrementing sequence numbers in byte 4.
@@ -58,11 +64,13 @@
 //    _i() timing, Ri() sweep, Bi() on a 700 ms interval, status input report 09 parsed by its Qr()) and
 //    the W1 Service v0.1.7 binary (8F, 200 ms, 86 sweep, then report-09 reads on the first FF05 collection).
 #include "drivers.h"
+#include "incott_protocol.h"
 #include "xenta_protocol.h"
 #include "ardor_fury_v2_protocol.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cwctype>
 #include <map>
 #include <memory>
 #include <set>
@@ -432,39 +440,120 @@ void PollWraithW1(PollContext& ctx) {
     }
 }
 
-void PollIncott(PollContext& ctx) {
-    for (USHORT pid : { (USHORT)0x522C, (USHORT)0x622C }) {
-        if (ctx.IsClaimed(0x093A, pid)) continue;
-        auto colls = ctx.Find(0x093A, pid, [](const HidColl& c) { return c.page() == 0xFF05 && c.featLen() >= 9; });
-        std::reverse(colls.begin(), colls.end());
-        for (const HidColl* c : colls) {
-            HidDev d;
-            if (!d.OpenFeatureOnly(*c)) continue;
-            if (!d.SetFeature({ 0x09, 0x89 })) continue;
-            std::vector<BYTE> r;
-            bool ok = false;
-            for (int i = 0; i < 10 && !ok; i++) {
-                Sleep(50);
-                if (!d.GetFeature(0x09, r)) break;
-                ok = r.size() >= 4 && r[0] == 0x09 && r[1] == 0x89 && (r[2] | r[3]) != 0;
+// Incott: see the header and incott_protocol.h. One read-only listener per FF05 input collection stays open
+// between polls, so the status the mouse pushes every few seconds queues up meanwhile.
+struct IncottListener {
+    std::unique_ptr<HidDev> dev;
+    incott_protocol::Layout layout = incott_protocol::Layout::Unknown;
+};
+std::map<std::wstring, IncottListener> g_incott;  // by collection path
+
+// Newest pushed status queued since the previous call (percent -1 when none). When nothing valid is queued,
+// waits up to waitMs for the next push. One absolute budget covers the whole call across all collections
+// (the drain time or waitMs, whichever is longer, and at most kIncottMaxReports reports), so a collection
+// that never stops sending cannot stall the poll.
+constexpr int kIncottDrainMs = 250;
+constexpr int kIncottMaxReports = 64;  // Windows queues 32 input reports per handle by default
+incott_protocol::Status DrainIncott(const std::vector<IncottListener*>& ls, int waitMs) {
+    incott_protocol::Status newest;
+    const ULONGLONG end = GetTickCount64() + std::max(waitMs, kIncottDrainMs);
+    auto left = [end] { return (LONGLONG)end - (LONGLONG)GetTickCount64(); };
+    int reports = 0;
+    std::vector<BYTE> r;
+    while (!ls.empty()) {
+        for (IncottListener* l : ls) {
+            while (reports < kIncottMaxReports && left() > 0) {
+                int n = l->dev->Read(r, (int)std::min<LONGLONG>(30, left()));
+                if (n < 0) break;  // queue empty
+                reports++;
+                incott_protocol::Status s;
+                if (n >= 8 && incott_protocol::ParseStatusPush(r, l->layout, s)) newest = s;
             }
-            if (!ok) continue;
-            int pct = r[2] & 0x7F;
-            if (pct > 100) continue;
-            bool cable = pid == 0x622C;
-            DeviceStatus s;
-            s.key = L"incott:" + Hex4(pid);
-            s.name = L"Incott mouse";  // the ids are shared by the G23 V2 and the G24
-            s.kind = DeviceKind::Mouse;
-            s.via = cable ? L"USB cable" : L"2.4 GHz receiver";
-            s.charging = (r[2] & 0x80) != 0;
-            s.connected = cable || pct > 0;  // 0 from the dongle: the mouse is off or out of range
-            if (s.connected) s.percent = pct;
-            if (!cable) s.graceSec = 1800;  // keep the last value if a sleeping mouse stops answering
-            ctx.Add(s, 0x093A, pid);
-            break;
+        }
+        if (waitMs <= 0 || newest.percent >= 0 || reports >= kIncottMaxReports || left() <= 0) break;
+    }
+    return newest;
+}
+
+// One documented read (SET_FEATURE [09][cmd], then GET_FEATURE 09 until `match` accepts the reply), tried on
+// each collection in turn. Returns false when no collection gave an accepted reply.
+template <class Match>
+bool IncottRead(const std::vector<const HidColl*>& colls, BYTE cmd, Match match) {
+    for (const HidColl* c : colls) {
+        HidDev d;
+        if (!d.OpenFeatureOnly(*c)) continue;
+        if (!d.SetFeature({ 0x09, cmd })) continue;
+        std::vector<BYTE> r;
+        for (int i = 0; i < 10; i++) {
+            Sleep(50);
+            if (!d.GetFeature(0x09, r)) break;
+            if (match(r)) return true;
         }
     }
+    return false;
+}
+
+void PollIncott(PollContext& ctx) {
+    using namespace incott_protocol;
+    static Receiver receiverKind = Receiver::Unknown;  // of the 522C dongle, kept while it stays plugged in
+    std::set<std::wstring> present;
+    bool onCable = false;  // the cable answered with a battery reading this poll
+    for (USHORT pid : { (USHORT)0x622C, (USHORT)0x522C }) {  // cable first: it decides about the receiver entry
+        if (ctx.IsClaimed(0x093A, pid)) continue;
+        bool cable = pid == 0x622C;
+        auto colls = ctx.Find(0x093A, pid, [](const HidColl& c) { return c.page() == 0xFF05 && c.featLen() >= 9; });
+        std::reverse(colls.begin(), colls.end());  // on the cable the first FF05 collection rejects SET_FEATURE
+        if (!cable && colls.empty()) receiverKind = Receiver::Unknown;
+        std::vector<IncottListener*> ls;
+        bool fresh = false;
+        for (const HidColl* c : ctx.Find(0x093A, pid, [](const HidColl& c) { return c.page() == 0xFF05 && c.inLen() >= 8; })) {
+            present.insert(c->path);
+            IncottListener& l = g_incott[c->path];
+            if (!l.dev) {
+                l.dev = std::make_unique<HidDev>();
+                if (!l.dev->OpenReadOnly(*c)) { g_incott.erase(c->path); continue; }
+                fresh = true;
+            }
+            ls.push_back(&l);
+        }
+        if (colls.empty() && ls.empty()) continue;
+
+        Status push = DrainIncott(ls, 0);
+        Status feature;
+        Receiver receiver = Receiver::Other;
+        if (!cable && onCable && push.percent < 0) continue;  // the mouse is on its cable: no receiver duplicate
+        if (push.percent < 0) {
+            if (!cable) {
+                if (receiverKind == Receiver::Unknown) {
+                    IncottRead(colls, 0x8F, [](const std::vector<BYTE>& r) {
+                        receiverKind = ParseReceiverKind(r);
+                        return receiverKind != Receiver::Unknown;
+                    });
+                }
+                receiver = receiverKind;
+            }
+            // Just opened: give the mouse time for its next push. On an 8K receiver 89 is not the mouse's reading;
+            // on the cable 89 is, but only the push carries the charging bit (89 byte 3 is the connection mode).
+            if (fresh && (cable || receiver == Receiver::EightK)) push = DrainIncott(ls, 3000);
+            if (push.percent < 0 && (cable || receiver == Receiver::Other))  // the cable, or a receiver that forwards 89
+                IncottRead(colls, 0x89, [&feature](const std::vector<BYTE>& r) { return ParseStatusFeature(r, feature); });
+        }
+        Reading reading = Choose(cable, receiver, push, feature);
+        if (!reading.show) continue;
+        DeviceStatus s;
+        s.key = L"incott:" + Hex4(pid);
+        s.name = L"Incott mouse";  // the ids are shared by the G23 / G23 V2 and the G24
+        s.kind = DeviceKind::Mouse;
+        s.via = cable ? L"USB cable" : L"2.4 GHz receiver";
+        s.charging = reading.charging;
+        s.connected = reading.connected;
+        s.asleep = reading.asleep;
+        s.percent = reading.percent;
+        if (!cable) s.graceSec = 1800;  // keep the last value if a sleeping mouse stops answering
+        ctx.Add(s, 0x093A, pid);
+        if (cable && reading.percent >= 0) onCable = true;
+    }
+    for (auto it = g_incott.begin(); it != g_incott.end();) it = present.count(it->first) ? std::next(it) : g_incott.erase(it);
 }
 
 void PollDeluxM800(PollContext& ctx) {
@@ -505,6 +594,11 @@ void PollDeluxM800(PollContext& ctx) {
             DeviceStatus s;
             s.key = L"delux:m800";
             s.name = L"Delux M800 Pro";
+            // The original Ninjutso Sora uses the same receiver and protocol; its receiver names itself in the
+            // HID product string ("Ninjutso Sora"), so show that name instead of the Delux one.
+            std::wstring product = HidProduct(*c);
+            for (auto& ch : product) ch = (wchar_t)towlower(ch);
+            if (product.find(L"sora") != std::wstring::npos) s.name = L"Ninjutso Sora";
             s.kind = DeviceKind::Mouse;
             s.via = receiver ? L"2.4 GHz receiver" : L"USB cable";
             s.connected = (r[6] != 0 || pct > 0);

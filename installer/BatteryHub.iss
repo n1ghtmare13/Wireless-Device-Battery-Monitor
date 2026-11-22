@@ -1,4 +1,4 @@
-; Inno Setup script for BatteryHub (https://jrsoftware.org/isinfo.php).
+﻿; Inno Setup script for BatteryHub (https://jrsoftware.org/isinfo.php).
 ; Per-user install by default: no administrator rights needed, installs to %LOCALAPPDATA%\Programs.
 ; Setup also offers "Install for all users" (Program Files, needs administrator rights).
 ; Build with installer\build-installer.ps1 (or: ISCC /DAppVersion=1.2.3 installer\BatteryHub.iss).
@@ -31,9 +31,19 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
+; English, or Simplified Chinese on a Chinese Windows (PR #43); no language prompt.
+ShowLanguageDialog=auto
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "chinesesimp"; MessagesFile: "Languages\ChineseSimplified.isl"
+
+[CustomMessages]
+english.AutostartTask=Start BatteryHub when I sign in to Windows
+chinesesimp.AutostartTask=登录 Windows 时启动 BatteryHub
 
 [Tasks]
-Name: "autostart"; Description: "Start BatteryHub when I sign in to Windows"
+Name: "autostart"; Description: "{cm:AutostartTask}"
 
 [Files]
 Source: "{#Root}\BatteryHub.exe"; DestDir: "{app}"; Flags: ignoreversion

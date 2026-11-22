@@ -48,7 +48,7 @@ Offsets below count the report id as byte zero:
 | 16 | Checksum; all 17 bytes sum to `0x55` (mod 256) | `3E` |
 
 The vendor's own software showed 80% for the same frame, which is what establishes the ×10
-scale. `GetConnectStatus` (`08 03 …`) answers with a 1-byte payload and reported the mouse as
+scale. `GetConnectStatus` (`08 03 …`) answered with a 1-byte payload and reported the mouse as
 linked at the same time.
 
 ## Other Areson mice
