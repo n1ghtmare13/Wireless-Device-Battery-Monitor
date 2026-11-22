@@ -112,7 +112,7 @@ void PollCherry(PollContext& ctx) {
 // ---------------------------------------------------------------------------
 // Cherry XTRFY 1K Mouse Receiver (046A:0330) and the mouse paired to it, plus the mouse
 // itself in wired USB-C mode (046A:0332), which speaks the same CompX protocol on its own
-// FF02:0002 collection with the charging flag set (no link-status command needed there).
+// FF02:0002 collection (no link-status command there; the charging flag is set instead).
 //
 // The receiver exposes a 17-byte vendor channel on usage page FF02, usage 0002 (in 17 / out 17).
 // It speaks the shared CompX framing also used by the Corsair Sabre V2 Pro (1B1C:2B2A, corsair.cpp)
@@ -127,7 +127,7 @@ void PollCherry(PollContext& ctx) {
 namespace {
 
 constexpr USHORT kXtrfyPid = 0x0330;       // 2.4 GHz 1K receiver
-constexpr USHORT kXtrfyWiredPid = 0x0332;  // mouse in wired USB-C mode
+constexpr USHORT kXtrfyWiredPid = 0x0332;  // the mouse itself, wired over USB-C
 constexpr size_t kXtrfyLen = 17;
 constexpr BYTE kXtrfyReportId = 0x08;
 constexpr BYTE kXtrfyLink = 0x03;
@@ -171,6 +171,8 @@ bool XtrfyExchange(HidDev& d, BYTE cmd, std::vector<BYTE>& r) {
 }  // namespace
 
 static void PollCherryXtrfy(PollContext& ctx) {
+    // Receiver first: on the dongle the wired interface is absent, and while cabled the receiver
+    // stays silent, so the first product that answers wins and only one entry is ever reported.
     const USHORT pids[] = {kXtrfyPid, kXtrfyWiredPid};
     for (USHORT pid : pids) {
         if (ctx.IsClaimed(kVid, pid)) continue;
@@ -178,13 +180,13 @@ static void PollCherryXtrfy(PollContext& ctx) {
                  return c.page() == 0xFF02 && c.usage() == 0x0002 && c.inLen() == kXtrfyLen && c.outLen() == kXtrfyLen;
              })) {
             HidDev d;
-            if (!d.Open(*c)) return;
+            if (!d.Open(*c)) continue;
             DeviceStatus s;
             std::vector<BYTE> r;
             bool answered = false;
             const bool wired = (pid == kXtrfyWiredPid);
             // Dongle: check whether the mouse is switched on and linked before asking for power.
-            // Wired USB-C: no link concept; the mouse answers GetPower directly, charging flag set.
+            // Wired USB-C: no link state, the mouse answers GetPower directly.
             if (!wired && XtrfyExchange(d, kXtrfyLink, r)) {
                 answered = true;
                 s.connected = r[6] != 0;
@@ -196,13 +198,13 @@ static void PollCherryXtrfy(PollContext& ctx) {
                     if (r[6] <= 100) s.percent = r[6];
                     s.charging = r[7] != 0;
                     s.millivolts = (r[8] << 8) | r[9];
+                } else if (!wired && answered && s.connected) {
+                    s.asleep = true;  // linked, but no usable power reply
                 }
-            } else if (answered && s.connected) {
-                s.asleep = true;  // linked, but no usable power reply
             }
-            if (!answered) return;  // silent: mouse switched off or asleep; the last value is kept
-            if (!s.connected) { ctx.Claim(kVid, pid); return; }
-            s.key = L"cherry:xtrfy";
+            if (!answered) continue;  // silent: mouse switched off or asleep; the last value is kept
+            if (!s.connected) { ctx.Claim(kVid, pid); continue; }
+            s.key = L"cherry:xtrfy";  // same entry whichever way the mouse is connected
             s.name = L"Cherry XTRFY wireless mouse";
             s.kind = DeviceKind::Mouse;
             s.via = wired ? L"USB cable" : L"2.4 GHz receiver";

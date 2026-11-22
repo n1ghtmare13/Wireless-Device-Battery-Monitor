@@ -11,7 +11,13 @@ set(WB_PORTABLE_DRIVERS
     hyperx.cpp
     playstation.cpp
     coolermaster.cpp
-    finalmouse.cpp)
+    finalmouse.cpp
+    zebronics.cpp
+    keychron.cpp
+    lamzu.cpp
+    aula.cpp
+    ninjutso.cpp
+    rapoo.cpp)
 
 list(TRANSFORM WB_PORTABLE_DRIVERS PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
 

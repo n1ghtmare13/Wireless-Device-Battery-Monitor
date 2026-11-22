@@ -168,6 +168,25 @@ int main() {
     assert(ctx.out.empty() && writes.empty());
     openOk = true;
 
+    // Wired USB-C mode (046A:0332): no link query, GetPower answered directly, charging flag set.
+    ctx = Poll({ { Reply(0x04, 80, 1, 0x10, 0x00) } }, { Collection(0x0332) });
+    assert(writes.size() == 1 && writes[0] == power);
+    assert(ctx.out.size() == 1 && ctx.out[0].percent == 80 && ctx.out[0].charging && ctx.out[0].millivolts == 0x1000);
+    assert(ctx.out[0].via == L"USB cable" && ctx.out[0].key == L"cherry:xtrfy");
+    assert(ctx.IsClaimed(0x046A, 0x0332) && !ctx.IsClaimed(0x046A, 0x0330));
+
+    // Wired interface silent (mouse off while cabled): nothing reported, nothing claimed.
+    ctx = Poll({}, { Collection(0x0332) });
+    assert(writes.size() == 1 && ctx.out.empty() && !ctx.IsClaimed(0x046A, 0x0332));
+
+    // Cable plugged in while the dongle is still attached: the dongle reports link down and is
+    // claimed, the wired interface reports the charge instead.
+    ctx = Poll({ { Reply(0x03, 0) }, { Reply(0x04, 60, 1, 0x0F, 0x00) } },
+               { Collection(), Collection(0x0332) });
+    assert(ctx.out.size() == 1 && ctx.out[0].percent == 60 && ctx.out[0].charging);
+    assert(ctx.out[0].via == L"USB cable");
+    assert(ctx.IsClaimed(0x046A, 0x0330) && ctx.IsClaimed(0x046A, 0x0332));
+
     std::puts("cherry xtrfy driver test passed");
     return 0;
 }
