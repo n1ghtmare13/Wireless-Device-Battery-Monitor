@@ -14,6 +14,9 @@ void AirPodsOnAdvert(UINT64 addr, int rssi, const BYTE* data, UINT32 len);
 // Google Fast Pair service data (16-bit UUID 0xFE2C, bytes after the UUID), see fastpair.cpp.
 void FastPairOnAdvert(UINT64 addr, const BYTE* data, UINT32 len);
 
+// QCY earbuds (MeloBuds Pro etc.): L/R/case battery in manufacturer data (company 0x521C/0x522C/0x071E), see qcy.cpp.
+void QcyOnAdvert(UINT64 addr, const BYTE* data, UINT32 len);
+
 // Battery split from the latest Fast Pair broadcast (percent, -1 unknown).
 struct FastPairBattery {
     int left = -1, right = -1, box = -1;
@@ -22,6 +25,8 @@ struct FastPairBattery {
 };
 // Latest broadcast of the device with this Bluetooth address, if heard in the last 5 minutes.
 bool FastPairLookup(UINT64 addr, FastPairBattery& out);
+// Latest QCY broadcast matched by classic Bluetooth address (from the advert's embedded MAC) or BLE address.
+bool QcyLookup(UINT64 addr, FastPairBattery& out);
 
 // Asks for an active scan from now on (scan responses carry device names). Takes effect on the next
 // EnsureBleWatcher calls; passive otherwise. Call from the poll thread, like EnsureBleWatcher.

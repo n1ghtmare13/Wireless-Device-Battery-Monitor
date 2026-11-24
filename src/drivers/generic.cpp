@@ -377,9 +377,10 @@ void PollBluetooth(PollContext& ctx) {
             }
             FastPairBattery b;
             bool got = FastPairLookup(addr->second, b);
+            if (!got) got = QcyLookup(addr->second, b);  // QCY MeloBuds Pro etc. broadcast only their own format
             for (int i = 0; !got && justStarted && !waited && i < 15; i++) {
                 Sleep(200);
-                got = FastPairLookup(addr->second, b);
+                got = FastPairLookup(addr->second, b) || QcyLookup(addr->second, b);
             }
             waited |= justStarted;
             if (got) ApplyFastPair(s, b);
@@ -393,6 +394,50 @@ void PollBluetooth(PollContext& ctx) {
                 s.kind = DeviceKind::Headset;
             }
         }
+        ctx.out.push_back(s);
+        ctx.btContainers.insert(cid);
+    }
+
+    // QCY earbuds (MeloBuds Pro) expose no standard Battery Service, so Windows has no level for
+    // them and they never entered `battery` above. Headsets heard in a QCY BLE broadcast are
+    // added here instead (krisgfx9/Wireless-Device-Battery-Monitor#1962).
+    if (!watching) {
+        watching = true;
+        if (EnsureBleWatcher()) {
+            for (int i = 0; i < 15; i++) {  // broadcasts come about every 1-2 s
+                bool any = false;
+                for (auto& [cid, addr] : containerAddr) {
+                    FastPairBattery b;
+                    if (QcyLookup(addr, b)) { any = true; break; }
+                }
+                if (any) break;
+                Sleep(200);
+            }
+        }
+    }
+    for (auto& [cid, name] : containerName) {
+        if (battery.count(cid) || reported.count(cid)) continue;
+        auto mc = containerConn.find(cid);
+        if (mc == containerConn.end() || !mc->second) continue;
+        auto ia = containerAddr.find(cid);
+        if (ia == containerAddr.end()) continue;
+        bool audio = false;
+        auto cod = containerCod.find(cid);
+        if (cod != containerCod.end() && KindFromClassOfDevice(cod->second) == DeviceKind::Headset) audio = true;
+        auto cat = containerCat.find(cid);
+        if (!audio && cat != containerCat.end() && KindFromCategory(cat->second) == DeviceKind::Headset) audio = true;
+        if (!audio) continue;
+        FastPairBattery b;
+        if (!QcyLookup(ia->second, b)) continue;
+        DeviceStatus s;
+        s.key = L"bt:" + cid;
+        s.name = !name.empty() ? name : L"Bluetooth device";
+        if (IsDuplicateBluetoothDevice(s, ctx.out)) continue;
+        s.via = L"Bluetooth";
+        s.kind = DeviceKind::Headset;
+        s.vid = 0x521C;
+        ApplyFastPair(s, b);
+        if (s.percent < 0) continue;
         ctx.out.push_back(s);
         ctx.btContainers.insert(cid);
     }

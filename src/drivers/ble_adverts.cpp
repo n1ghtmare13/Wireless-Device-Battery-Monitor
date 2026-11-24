@@ -157,6 +157,26 @@ void OnReceived(IReceivedArgs* args) {
     }
     Release(mview);
 
+    // QCY earbuds put L/R/case battery into manufacturer-specific data (see qcy.cpp).
+    for (UINT16 qcid : { (UINT16)0x521C, (UINT16)0x522C, (UINT16)0x071E }) {
+        IManufacturerDataView* qview = nullptr;
+        if (SUCCEEDED(adv->GetManufacturerDataByCompanyId(qcid, &qview)) && qview) {
+            UINT32 count = 0;
+            qview->get_Size(&count);
+            for (UINT32 i = 0; i < count; i++) {
+                IManufacturerData* md = nullptr;
+                IBufferAbi* buf = nullptr;
+                BYTE* p;
+                UINT32 len;
+                if (SUCCEEDED(qview->GetAt(i, &md)) && md && SUCCEEDED(md->get_Data(&buf)) && Bytes(buf, p, len))
+                    QcyOnAdvert(addr, p, len);
+                Release(buf);
+                Release(md);
+            }
+        }
+        Release(qview);
+    }
+
     IDataSectionView* sview = nullptr;
     if (SUCCEEDED(adv->GetSectionsByType(kServiceData16, &sview)) && sview) {
         UINT32 count = 0;
